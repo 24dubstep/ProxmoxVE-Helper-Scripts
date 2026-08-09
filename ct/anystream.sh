@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+source <(curl -fsSL https://raw.githubusercontent.com/24dubstep/ProxmoxVE-Helper-Scripts/main/misc/build.func)
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Mcanon
-# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
+# License: MIT | https://github.com/24dubstep/ProxmoxVE-Helper-Scripts/raw/main/LICENSE
 # Source: https://anystream.dev/ | Github: https://github.com/DrewCarlson/AnyStream
 
 APP="AnyStream"
@@ -24,18 +24,16 @@ function update_script() {
   header_info
   check_container_storage
   check_container_resources
-  if [[ ! -f /opt/anystream/anystream-server.jar ]]; then
+  if [[ ! -f /opt/anystream/bin/anystream ]]; then
     msg_error "No ${APP} Installation Found!"
     exit
   fi
-  if check_for_gh_release "anystream" "DrewCarlson/AnyStream"; then
+  if check_for_gh_release "anystream" "DrewCarlson/AnyStream" "v0.0.1-test"; then
     msg_info "Stopping Service"
     systemctl stop anystream
     msg_ok "Stopped Service"
 
-    rm -f /opt/anystream/anystream-server.jar
-    USE_ORIGINAL_FILENAME="true" fetch_and_deploy_gh_release "anystream" "DrewCarlson/AnyStream" "singlefile" "latest" "/opt/anystream" "anystream-server*.jar"
-    mv /opt/anystream/anystream-server-*.jar /opt/anystream/anystream-server.jar 2>/dev/null || true
+    fetch_and_deploy_gh_release "anystream" "DrewCarlson/AnyStream" "prebuild" "v0.0.1-test" "/opt/anystream" "anystream-server-*.zip"
 
     msg_info "Starting Service"
     systemctl start anystream

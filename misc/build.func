@@ -5171,7 +5171,11 @@ EOF
     export CONTAINER_INSTALLING=true
 
     local _install_script
-    _install_script="$(curl -fsSL "https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/${var_install}.sh")"
+    if [[ "$var_install" =~ ^https?:// ]]; then
+      _install_script="$(curl -fsSL "$var_install")"
+    else
+      _install_script="$(curl -fsSL "https://raw.githubusercontent.com/24dubstep/ProxmoxVE-Helper-Scripts/main/install/${var_install}.sh")"
+    fi
     lxc-attach -n "$CTID" -- bash -c "$_install_script"
     local lxc_exit=$?
 
@@ -5595,7 +5599,11 @@ EOF
           set +Eeuo pipefail
           trap - ERR
           local _install_script
-          _install_script="$(curl -fsSL "https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/${var_install}.sh")"
+          if [[ "$var_install" =~ ^https?:// ]]; then
+            _install_script="$(curl -fsSL "$var_install")"
+          else
+            _install_script="$(curl -fsSL "https://raw.githubusercontent.com/24dubstep/ProxmoxVE-Helper-Scripts/main/install/${var_install}.sh")"
+          fi
           lxc-attach -n "$CTID" -- bash -c "$_install_script"
           local apt_retry_exit=$?
           set -Eeuo pipefail
