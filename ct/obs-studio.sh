@@ -78,7 +78,7 @@ if [[ -n "${GPU_DRIVER_PATH}" ]]; then
           pct exec "${CTID}" -- bash -c "dpkg -i '${DRIVER_DEST}' 2>&1 || apt-get install -f -y 2>&1" >/dev/null 2>&1
           ;;
         run)
-          pct exec "${CTID}" -- bash -c "chmod +x '${DRIVER_DEST}' && '${DRIVER_DEST}' --no-kernel-module --silent 2>&1" >/dev/null 2>&1
+          pct exec "${CTID}" -- bash -c "chmod +x '${DRIVER_DEST}' && '${DRIVER_DEST}' --no-kernel-module --ui=none --no-drm --no-x-check 2>&1" >/dev/null 2>&1
           ;;
         *)
           msg_warn "Unknown driver format '.${GPU_DRIVER_EXT}' — pushed to ${DRIVER_DEST} but not auto-installed"
