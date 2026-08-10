@@ -48,7 +48,24 @@ $STD apt-get install -y nvidia-container-toolkit 2>/dev/null || true
 nvidia-ctk runtime configure --runtime=docker >/dev/null 2>&1 || true
 systemctl restart docker >/dev/null 2>&1 || true
 
-msg_ok "Installed Docker & NVIDIA Container Toolkit"
+msg_info "Installing NVIDIA CUDA 12 Toolkit & Repository"
+KEYRING_TMP="$(mktemp)"
+if curl -fsSL -o "${KEYRING_TMP}" "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb" 2>/dev/null; then
+  $STD dpkg -i "${KEYRING_TMP}" 2>/dev/null || true
+fi
+rm -f "${KEYRING_TMP}"
+
+$STD apt-get update 2>/dev/null || true
+$STD apt-get install -y --no-install-recommends cuda-toolkit-12-0 nvidia-cuda-toolkit 2>/dev/null || \
+$STD apt-get install -y --no-install-recommends nvidia-cuda-toolkit 2>/dev/null || true
+
+cat <<'CUDAENV' >/etc/profile.d/cuda.sh
+export PATH=/usr/local/cuda-12/bin:/usr/local/cuda/bin:${PATH}
+export LD_LIBRARY_PATH=/usr/local/cuda-12/lib64:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+CUDAENV
+chmod +x /etc/profile.d/cuda.sh
+
+msg_ok "Installed Docker, NVIDIA Container Toolkit & CUDA 12"
 
 # ==============================================================================
 # RESTREAMER START SCRIPT

@@ -117,7 +117,7 @@ if [[ -n "${GPU_DRIVER_PATH}" ]]; then
       msg_ok "Pushed ${GPU_DRIVER_FILENAME} into container"
 
       msg_info "Cleaning conflicting apt NVIDIA packages in container"
-      pct exec "${CTID}" -- bash -c "apt-get remove --purge -y '*nvidia*' '*cuda*' 2>/dev/null || true" >/dev/null 2>&1
+      pct exec "${CTID}" -- bash -c "apt-get remove --purge -y 'nvidia-driver-*' 'xserver-xorg-video-nvidia-*' 2>/dev/null || true" >/dev/null 2>&1
 
       msg_info "Installing GPU driver in container"
       case "${GPU_DRIVER_EXT}" in
@@ -132,6 +132,23 @@ if [[ -n "${GPU_DRIVER_PATH}" ]]; then
           msg_info "Install it manually: pct exec ${CTID} -- bash -c 'your-install-command ${DRIVER_DEST}'"
           ;;
       esac
+
+      msg_info "Installing NVIDIA CUDA 12 Toolkit in container"
+      pct exec "${CTID}" -- bash -c "
+        KEYRING=\$(mktemp)
+        if curl -fsSL -o \${KEYRING} https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb 2>/dev/null; then
+          dpkg -i \${KEYRING} 2>/dev/null || true
+        fi
+        rm -f \${KEYRING}
+        apt-get update 2>/dev/null || true
+        apt-get install -y --no-install-recommends cuda-toolkit-12-0 nvidia-cuda-toolkit 2>/dev/null || apt-get install -y --no-install-recommends nvidia-cuda-toolkit 2>/dev/null || true
+        cat <<'CUDAENV' >/etc/profile.d/cuda.sh
+export PATH=/usr/local/cuda-12/bin:/usr/local/cuda/bin:\${PATH}
+export LD_LIBRARY_PATH=/usr/local/cuda-12/lib64:/usr/local/cuda/lib64:\${LD_LIBRARY_PATH}
+CUDAENV
+        chmod +x /etc/profile.d/cuda.sh
+      " >/dev/null 2>&1
+      msg_ok "Installed CUDA 12 Toolkit"
 
       # Verify installation
       if pct exec "${CTID}" -- bash -c "nvidia-smi >/dev/null 2>&1 || ls /dev/dri/renderD* >/dev/null 2>&1" 2>/dev/null; then
