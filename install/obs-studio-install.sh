@@ -51,7 +51,9 @@ msg_ok "Installed Dependencies"
 
 # ==============================================================================
 # GPU PASSTHROUGH (VAAPI / NVENC)
+# Disable automatic apt NVIDIA driver installation; custom driver is pushed via host script.
 # ==============================================================================
+export INSTALL_NVIDIA_DRIVERS="no"
 setup_hwaccel
 
 msg_info "Detecting GPU Encoder"

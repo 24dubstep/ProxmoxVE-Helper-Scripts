@@ -49,17 +49,17 @@ build_container
 # ==============================================================================
 # GPU DRIVER PUSH (host → container)
 # ==============================================================================
+DEFAULT_GPU_DRIVER="/root/proxmox-vgpu-installer/guest-drivers/16.9_535.230.02/NVIDIA-Linux-x86_64-535.230.02-grid.run"
+
 echo -e "\n${INFO}${YW}GPU Driver Installation${CL}"
 echo -e "${TAB}${INFO}${YW}If you have a GPU driver package (.deb or .run) for the LXC guest,${CL}"
 echo -e "${TAB}${INFO}${YW}provide the path on the Proxmox host to push it into the container.${CL}"
-echo -e "${TAB}${INFO}${YW}Leave empty to skip.${CL}\n"
 
-read -r -p "${TAB}Enter GPU driver file path (or press Enter to skip): " GPU_DRIVER_PATH
+read -r -p "${TAB}Enter GPU driver file path [default: ${DEFAULT_GPU_DRIVER}]: " GPU_DRIVER_INPUT
+GPU_DRIVER_PATH="${GPU_DRIVER_INPUT:-${DEFAULT_GPU_DRIVER}}"
+GPU_DRIVER_PATH="$(echo "${GPU_DRIVER_PATH}" | xargs)"
 
 if [[ -n "${GPU_DRIVER_PATH}" ]]; then
-  # Trim whitespace
-  GPU_DRIVER_PATH="$(echo "${GPU_DRIVER_PATH}" | xargs)"
-
   if [[ ! -f "${GPU_DRIVER_PATH}" ]]; then
     msg_error "File not found: ${GPU_DRIVER_PATH}"
     echo -e "${TAB}${INFO}${YW}Skipping GPU driver installation. You can install it manually later.${CL}"
@@ -81,7 +81,7 @@ if [[ -n "${GPU_DRIVER_PATH}" ]]; then
           pct exec "${CTID}" -- bash -c "dpkg -i '${DRIVER_DEST}' 2>&1 || apt-get install -f -y 2>&1" >/dev/null 2>&1
           ;;
         run)
-          pct exec "${CTID}" -- bash -c "chmod +x '${DRIVER_DEST}' && '${DRIVER_DEST}' -s --accept-license --no-kernel-module --ui=none --no-drm --no-x-check --no-nouveau-check --silent 2>&1" >/dev/null 2>&1
+          pct exec "${CTID}" -- bash -c "chmod +x '${DRIVER_DEST}' && '${DRIVER_DEST}' -s --accept-license --no-kernel-module --ui=none --no-drm --no-x-check --no-nouveau-check 2>&1" >/dev/null 2>&1
           ;;
         *)
           msg_warn "Unknown driver format '.${GPU_DRIVER_EXT}' — pushed to ${DRIVER_DEST} but not auto-installed"
