@@ -51,11 +51,8 @@ function update_script() {
   exit
 }
 
-start
-build_container
-
 # ==============================================================================
-# RESTREAMER ADMIN CREDENTIALS CONFIGURATION
+# PRE-FLIGHT PROMPTS (Admin Credentials & GPU Driver Path)
 # ==============================================================================
 echo -e "\n${INFO}${YW}Restreamer Admin Credentials Setup${CL}"
 read -r -p "${TAB}Enter Admin Username [default: admin]: " RESTREAMER_USER
@@ -64,6 +61,21 @@ RESTREAMER_USER="${RESTREAMER_USER:-admin}"
 read -r -p "${TAB}Enter Admin Password [default: admin123]: " RESTREAMER_PASS
 RESTREAMER_PASS="${RESTREAMER_PASS:-admin123}"
 
+DEFAULT_GPU_DRIVER="/root/proxmox-vgpu-installer/guest-drivers/16.9_535.230.02/NVIDIA-Linux-x86_64-535.230.02-grid.run"
+
+echo -e "\n${INFO}${YW}GPU Driver Installation (CUDA / NVENC)${CL}"
+echo -e "${TAB}${INFO}${YW}Provide host path for guest GPU driver to install BEFORE NVIDIA/CUDA checks.${CL}"
+
+read -r -p "${TAB}Enter GPU driver file path [default: ${DEFAULT_GPU_DRIVER}]: " GPU_DRIVER_INPUT
+GPU_DRIVER_PATH="${GPU_DRIVER_INPUT:-${DEFAULT_GPU_DRIVER}}"
+GPU_DRIVER_PATH="$(echo "${GPU_DRIVER_PATH}" | xargs)"
+
+# ==============================================================================
+# BUILD LXC CONTAINER
+# ==============================================================================
+start
+build_container
+
 # Save credentials into LXC environment script
 pct exec "${CTID}" -- bash -c "cat <<EOF >/etc/restreamer.env
 RS_USERNAME=${RESTREAMER_USER}
@@ -71,18 +83,8 @@ RS_PASSWORD=${RESTREAMER_PASS}
 EOF"
 
 # ==============================================================================
-# GPU DRIVER PUSH (host → container)
+# INSTALL LOCAL .RUN GPU DRIVER & CUDA BEFORE VERIFICATION
 # ==============================================================================
-DEFAULT_GPU_DRIVER="/root/proxmox-vgpu-installer/guest-drivers/16.9_535.230.02/NVIDIA-Linux-x86_64-535.230.02-grid.run"
-
-echo -e "\n${INFO}${YW}GPU Driver Installation (CUDA / NVENC)${CL}"
-echo -e "${TAB}${INFO}${YW}If you have a GPU driver package (.deb or .run) for the LXC guest,${CL}"
-echo -e "${TAB}${INFO}${YW}provide the path on the Proxmox host to push it into the container.${CL}"
-
-read -r -p "${TAB}Enter GPU driver file path [default: ${DEFAULT_GPU_DRIVER}]: " GPU_DRIVER_INPUT
-GPU_DRIVER_PATH="${GPU_DRIVER_INPUT:-${DEFAULT_GPU_DRIVER}}"
-GPU_DRIVER_PATH="$(echo "${GPU_DRIVER_PATH}" | xargs)"
-
 if [[ -n "${GPU_DRIVER_PATH}" ]]; then
   if [[ ! -f "${GPU_DRIVER_PATH}" ]]; then
     msg_error "File not found: ${GPU_DRIVER_PATH}"
@@ -96,22 +98,7 @@ if [[ -n "${GPU_DRIVER_PATH}" ]]; then
     if pct push "${CTID}" "${GPU_DRIVER_PATH}" "${DRIVER_DEST}" >/dev/null 2>&1; then
       msg_ok "Pushed ${GPU_DRIVER_FILENAME} into container"
 
-      msg_info "Cleaning conflicting apt NVIDIA packages in container"
-      pct exec "${CTID}" -- bash -c "apt-get remove --purge -y 'nvidia-driver-*' 'xserver-xorg-video-nvidia-*' 2>/dev/null || true" >/dev/null 2>&1
-
-      msg_info "Installing GPU driver in container"
-      case "${GPU_DRIVER_EXT}" in
-        deb)
-          pct exec "${CTID}" -- bash -c "dpkg -i '${DRIVER_DEST}' 2>&1 || apt-get install -f -y 2>&1" >/dev/null 2>&1
-          ;;
-        run)
-          pct exec "${CTID}" -- bash -c "chmod +x '${DRIVER_DEST}' && '${DRIVER_DEST}' -s --accept-license --no-kernel-module --ui=none --no-drm --no-x-check --no-nouveau-check 2>&1" >/dev/null 2>&1
-          ;;
-        *)
-          msg_warn "Unknown driver format '.${GPU_DRIVER_EXT}' — pushed to ${DRIVER_DEST} but not auto-installed"
-          ;;
-      esac
-
+      # Install CUDA 12 Toolkit FIRST
       msg_info "Installing NVIDIA CUDA 12 Toolkit in container"
       pct exec "${CTID}" -- bash -c "
         KEYRING=\$(mktemp)
@@ -129,12 +116,30 @@ CUDAENV
       " >/dev/null 2>&1
       msg_ok "Installed CUDA 12 Toolkit"
 
+      # Clean conflicting apt driver packages
+      msg_info "Cleaning conflicting apt NVIDIA packages in container"
+      pct exec "${CTID}" -- bash -c "apt-get remove --purge -y 'nvidia-driver-*' 'xserver-xorg-video-nvidia-*' 2>/dev/null || true" >/dev/null 2>&1
+
+      # Execute host-matched GPU driver .run file LAST so its libraries remain active
+      msg_info "Installing host-matched GPU driver (.run file) in container"
+      case "${GPU_DRIVER_EXT}" in
+        deb)
+          pct exec "${CTID}" -- bash -c "dpkg -i '${DRIVER_DEST}' 2>&1 || apt-get install -f -y 2>&1" >/dev/null 2>&1
+          ;;
+        run)
+          pct exec "${CTID}" -- bash -c "chmod +x '${DRIVER_DEST}' && '${DRIVER_DEST}' -s --accept-license --no-kernel-module --ui=none --no-drm --no-x-check --no-nouveau-check 2>&1" >/dev/null 2>&1
+          ;;
+        *)
+          msg_warn "Unknown driver format '.${GPU_DRIVER_EXT}' — pushed to ${DRIVER_DEST} but not auto-installed"
+          ;;
+      esac
+
       # Configure NVIDIA Container Toolkit inside LXC
       pct exec "${CTID}" -- bash -c "nvidia-ctk runtime configure --runtime=docker 2>/dev/null && systemctl restart docker 2>/dev/null" || true
 
-      # Verify installation
-      if pct exec "${CTID}" -- bash -c "nvidia-smi >/dev/null 2>&1 || ls /dev/dri/renderD* >/dev/null 2>&1" 2>/dev/null; then
-        msg_ok "GPU driver and CUDA support installed successfully"
+      # Check nvidia-smi AFTER .run installation
+      if pct exec "${CTID}" -- bash -c "nvidia-smi" >/dev/null 2>&1; then
+        msg_ok "NVIDIA GPU driver & CUDA verified (nvidia-smi active)"
       else
         msg_warn "GPU driver pushed and install attempted — verify GPU passthrough in LXC config"
       fi
@@ -149,7 +154,7 @@ else
   echo -e "${TAB}${INFO}${YW}No GPU driver specified — skipping.${CL}"
 fi
 
-# Restart Restreamer service to pick up driver & credential changes
+# Restart Restreamer service AFTER GPU driver installation
 pct exec "${CTID}" -- bash -c "systemctl restart restreamer.service 2>/dev/null" || true
 
 description
