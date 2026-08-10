@@ -4,6 +4,13 @@
 # Author: Mcanon
 # License: MIT | https://github.com/24dubstep/ProxmoxVE-Helper-Scripts/raw/main/LICENSE
 # Source: https://obsproject.com/
+# Source: https://github.com/Niek/obs-web
+# Source: https://github.com/obsproject/obs-websocket
+# Source: https://github.com/novnc/noVNC
+# Source: https://github.com/LibVNC/x11vnc
+# Source: https://github.com/canonical/lightdm
+# Source: https://openbox.org/
+# Source: https://www.nginx.com/
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
@@ -14,40 +21,57 @@ network_check
 update_os
 
 # ==============================================================================
-# CONFIGURABLE VARIABLES (override via environment before install)
+# CONFIGURABLE VARIABLES
 # ==============================================================================
 OBS_RESOLUTION="${OBS_RESOLUTION:-1920x1080}"
 OBS_FPS="${OBS_FPS:-30}"
-OBS_DISPLAY="${OBS_DISPLAY:-:1}"
+OBS_DISPLAY="${OBS_DISPLAY:-:0}"
 OBS_VNC_PORT="${OBS_VNC_PORT:-5900}"
 OBS_NOVNC_PORT="${OBS_NOVNC_PORT:-8080}"
 OBS_DASHBOARD_PORT="${OBS_DASHBOARD_PORT:-8888}"
+OBS_WEBSOCKET_PORT="${OBS_WEBSOCKET_PORT:-4455}"
 
 # Parse resolution
 OBS_WIDTH="${OBS_RESOLUTION%x*}"
 OBS_HEIGHT="${OBS_RESOLUTION#*x}"
 
 # ==============================================================================
-# DEPENDENCIES
+# DEPENDENCIES (LightDM, X11, Openbox, x11vnc, noVNC, OBS Studio, Nginx, etc.)
 # ==============================================================================
-msg_info "Installing Dependencies"
+msg_info "Installing Dependencies (LightDM, OBS Studio, X11, VNC, Nginx)"
 $STD apt-get update
-$STD apt-get install -y \
-  software-properties-common \
-  ffmpeg \
-  obs-studio \
+$STD apt-get install -y software-properties-common
+$STD add-apt-repository -y universe
+$STD add-apt-repository -y ppa:obsproject/obs-studio
+$STD apt-get update
+
+DEBIAN_FRONTEND=noninteractive $STD apt-get install -y \
+  lightdm \
+  lightdm-gtk-greeter \
   openbox \
   xvfb \
   x11vnc \
   novnc \
   websockify \
   dbus-x11 \
+  ffmpeg \
+  obs-studio \
   pulseaudio \
   alsa-utils \
+  mesa-utils \
+  libgl1-mesa-dri \
+  libglx-mesa0 \
   nginx-light \
   jq \
-  procps
+  procps \
+  curl \
+  git \
+  wget
 msg_ok "Installed Dependencies"
+
+# Set LightDM as default display manager non-interactively
+echo "set shared/default-x-display-manager lightdm" | debconf-communicate 2>/dev/null || true
+dpkg-reconfigure -f noninteractive lightdm 2>/dev/null || true
 
 # ==============================================================================
 # GPU PASSTHROUGH (VAAPI / NVENC)
@@ -78,32 +102,48 @@ fi
 msg_ok "Detected GPU Encoder: ${GPU_INFO}"
 
 # ==============================================================================
-# OBS PROFILE PRE-CONFIGURATION
+# LIGHTDM & X11 CONFIGURATION
 # ==============================================================================
-msg_info "Configuring OBS Studio Profile"
+msg_info "Configuring LightDM & X11 Framebuffer"
+
+mkdir -p /etc/lightdm/lightdm.conf.d
+
+cat <<EOF >/etc/lightdm/lightdm.conf.d/50-headless-obs.conf
+[Seat:*]
+autologin-user=root
+autologin-user-timeout=0
+user-session=openbox
+type=local
+xserver-command=Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 +extension GLX +render -noreset
+EOF
+
+msg_ok "Configured LightDM & X11 Framebuffer"
+
+# ==============================================================================
+# OBS PROFILE & WEBSOCKET PRE-CONFIGURATION
+# ==============================================================================
+msg_info "Configuring OBS Studio Profile & WebSocket"
 
 OBS_CONFIG="/root/.config/obs-studio"
 OBS_PROFILE="${OBS_CONFIG}/basic/profiles/Headless"
 OBS_SCENES="${OBS_CONFIG}/basic/scenes"
+OBS_PLUGIN_WS="${OBS_CONFIG}/plugin_config/obs-websocket"
 
-mkdir -p "${OBS_PROFILE}" "${OBS_SCENES}"
+mkdir -p "${OBS_PROFILE}" "${OBS_SCENES}" "${OBS_PLUGIN_WS}" /root/recordings
 
 # Determine encoder settings for profile
 case "${GPU_ENCODER}" in
   vaapi)
     STREAM_ENCODER="ffmpeg_vaapi"
     RECORD_ENCODER="ffmpeg_vaapi"
-    ENCODER_SETTINGS='rate_control=CBR\nbitrate=4500'
     ;;
   nvenc)
     STREAM_ENCODER="jim_nvenc"
     RECORD_ENCODER="jim_nvenc"
-    ENCODER_SETTINGS='rate_control=CBR\nbitrate=4500\npreset=p5'
     ;;
   *)
     STREAM_ENCODER="obs_x264"
     RECORD_ENCODER="obs_x264"
-    ENCODER_SETTINGS='rate_control=CBR\nbitrate=2500\npreset=veryfast'
     ;;
 esac
 
@@ -190,7 +230,7 @@ cat <<'EOF' >"${OBS_SCENES}/Headless.json"
 }
 EOF
 
-# global.ini — disable first-run dialogs and auto-config wizard
+# global.ini — disable first-run dialogs, enable obs-websocket port 4455 without auth
 cat <<EOF >"${OBS_CONFIG}/global.ini"
 [General]
 FirstRun=false
@@ -203,20 +243,28 @@ DockState=000000ff00000000fd000000020000000000000100000002e4fc0100000001fb000000
 WarnBeforeStartingStream=false
 WarnBeforeStoppingStream=false
 
+[OBSWebSocket]
+ServerEnabled=true
+ServerPort=${OBS_WEBSOCKET_PORT}
+AuthRequired=false
+
 [Video]
 BaseCX=${OBS_WIDTH}
 BaseCY=${OBS_HEIGHT}
 OutputCX=${OBS_WIDTH}
 OutputCY=${OBS_HEIGHT}
-
-[Panels]
-CookieId=
 EOF
 
-# Create recordings directory
-mkdir -p /root/recordings
+# plugin config for obs-websocket
+cat <<EOF >"${OBS_PLUGIN_WS}/config.json"
+{
+  "ServerEnabled": true,
+  "ServerPort": ${OBS_WEBSOCKET_PORT},
+  "AuthRequired": false
+}
+EOF
 
-msg_ok "Configured OBS Studio Profile"
+msg_ok "Configured OBS Studio Profile & WebSocket"
 
 # ==============================================================================
 # OPENBOX CONFIGURATION (auto-maximise OBS, no decorations)
@@ -263,52 +311,74 @@ EOF
 msg_ok "Configured Openbox Window Manager"
 
 # ==============================================================================
-# NOVNC WEB DESKTOP
+# NOVNC & X11VNC DESKTOP ENVIRONMENT
 # ==============================================================================
-msg_info "Configuring Web Desktop Environment"
+msg_info "Configuring VNC & noVNC Web Desktop"
 
 ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html
 
+# OBS Start Script
 cat <<EOF >/usr/local/bin/start-obs-web.sh
 #!/usr/bin/env bash
 export DISPLAY=${OBS_DISPLAY}
 export HOME=/root
 
-# Cleanup stale X locks
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+DISP_NUM="\${OBS_DISPLAY#:}"
+rm -f /tmp/.X\${DISP_NUM}-lock /tmp/.X11-unix/X\${DISP_NUM}
 
-# Start virtual framebuffer
-Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 &
-sleep 2
+# Start virtual framebuffer if LightDM/Xorg isn't running
+if ! pgrep -x Xvfb >/dev/null && ! pgrep -x Xorg >/dev/null; then
+  Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 +extension GLX +render -noreset &
+  sleep 2
+fi
 
-# Start PulseAudio for audio support
+# Start PulseAudio
 pulseaudio --start --exit-idle-time=-1 2>/dev/null || true
 sleep 1
 
-# Start Openbox window manager
-openbox &
-sleep 1
+# Start Openbox
+if ! pgrep -x openbox >/dev/null; then
+  openbox &
+  sleep 1
+fi
 
-# Start VNC server
-x11vnc -display ${OBS_DISPLAY} -forever -shared -nopw -rfbport ${OBS_VNC_PORT} -bg
-sleep 1
+# Start x11vnc
+if ! pgrep -x x11vnc >/dev/null; then
+  x11vnc -display ${OBS_DISPLAY} -forever -shared -nopw -rfbport ${OBS_VNC_PORT} -bg 2>/dev/null || true
+  sleep 1
+fi
 
-# Start noVNC websocket proxy
-websockify --web /usr/share/novnc ${OBS_NOVNC_PORT} localhost:${OBS_VNC_PORT} &
+# Start websockify / noVNC
+if ! pgrep -f "websockify" >/dev/null; then
+  websockify --web /usr/share/novnc ${OBS_NOVNC_PORT} localhost:${OBS_VNC_PORT} &
+  sleep 1
+fi
 
-# Launch OBS in headless mode (no first-run wizard)
-exec obs --disable-shutdown-check --startstreaming 2>/dev/null || exec obs
+# Launch OBS Studio in persistent monitor loop
+while true; do
+  if ! pgrep -x obs >/dev/null; then
+    obs --profile "Headless" --collection "Headless" --startstreaming >>/var/log/obs-studio.log 2>&1 || \
+    obs --profile "Headless" --collection "Headless" >>/var/log/obs-studio.log 2>&1 || \
+    obs >>/var/log/obs-studio.log 2>&1
+  fi
+  sleep 3
+done
 EOF
 chmod +x /usr/local/bin/start-obs-web.sh
 
-msg_ok "Configured Web Desktop Environment"
+msg_ok "Configured VNC & noVNC Web Desktop"
 
 # ==============================================================================
-# STATUS DASHBOARD
+# STATUS DASHBOARD & OBS-WEB CONTROL PANEL (PORT 8888)
 # ==============================================================================
-msg_info "Setting up Status Dashboard"
+msg_info "Setting up OBS Web Dashboard & Control Panel"
 
-mkdir -p /var/www/obs-dashboard /var/www/obs-dashboard/api
+mkdir -p /var/www/obs-dashboard /var/www/obs-dashboard/api /var/www/obs-dashboard/obs-web
+
+# Fetch Niek's pre-built OBS-Web frontend
+if command -v git >/dev/null 2>&1; then
+  git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /var/www/obs-dashboard/obs-web 2>/dev/null || true
+fi
 
 # Status update script (called by cron and on-demand)
 cat <<'STATUSEOF' >/usr/local/bin/obs-status-update.sh
@@ -342,13 +412,17 @@ MEM_TOTAL=$(free -m | awk '/Mem:/{print $2}' 2>/dev/null || echo "0")
 MEM_USED=$(free -m | awk '/Mem:/{print $3}' 2>/dev/null || echo "0")
 DISK_USAGE=$(df -h /root/recordings 2>/dev/null | awk 'NR==2{print $5}' || echo "N/A")
 
-# VNC status
+# VNC & LightDM status
 VNC_STATUS="stopped"
 if pgrep -x x11vnc &>/dev/null; then
   VNC_STATUS="running"
 fi
 
-# Container IP
+LIGHTDM_STATUS="stopped"
+if pgrep -x lightdm &>/dev/null || pgrep -x Xvfb &>/dev/null; then
+  LIGHTDM_STATUS="running"
+fi
+
 CONTAINER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown")
 
 cat <<JSONEOF >/var/www/obs-dashboard/api/status.json
@@ -356,7 +430,8 @@ cat <<JSONEOF >/var/www/obs-dashboard/api/status.json
   "obs": {
     "status": "${OBS_STATUS}",
     "pid": "${OBS_PID}",
-    "uptime": "${OBS_UPTIME}"
+    "uptime": "${OBS_UPTIME}",
+    "websocket_port": 4455
   },
   "gpu": {
     "info": "${GPU_INFO}",
@@ -369,6 +444,7 @@ cat <<JSONEOF >/var/www/obs-dashboard/api/status.json
     "disk_recordings": "${DISK_USAGE}"
   },
   "services": {
+    "lightdm": "${LIGHTDM_STATUS}",
     "vnc": "${VNC_STATUS}",
     "novnc_url": "http://${CONTAINER_IP}:8080"
   },
@@ -378,7 +454,7 @@ JSONEOF
 STATUSEOF
 chmod +x /usr/local/bin/obs-status-update.sh
 
-# Dashboard HTML
+# Combined Dashboard HTML (System Status + OBS Control Links + WebSocket Controller)
 cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
 <!DOCTYPE html>
 <html lang="en">
@@ -551,8 +627,8 @@ cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
 </head>
 <body>
   <div class="header">
-    <h1>🎬 OBS Studio — Headless Dashboard</h1>
-    <p>Proxmox LXC Container Status Panel</p>
+    <h1>🎬 OBS Studio — Headless Control Panel</h1>
+    <p>Proxmox LXC Container Management Dashboard</p>
   </div>
 
   <div class="grid">
@@ -570,6 +646,10 @@ cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
       <div class="status-row">
         <span class="status-label">Uptime</span>
         <span id="obs-uptime" class="status-value">—</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">WebSocket Port</span>
+        <span id="obs-ws-port" class="status-value">4455</span>
       </div>
     </div>
 
@@ -608,16 +688,21 @@ cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
       </div>
     </div>
 
-    <!-- Services -->
+    <!-- Quick Actions & Links -->
     <div class="card">
-      <div class="card-title"><span class="icon">🔗</span> Services & Links</div>
+      <div class="card-title"><span class="icon">🔗</span> Remote Control & Interfaces</div>
+      <div class="status-row">
+        <span class="status-label">LightDM / X11</span>
+        <span id="lightdm-status" class="badge badge-red loading">Loading...</span>
+      </div>
       <div class="status-row">
         <span class="status-label">VNC Server</span>
         <span id="vnc-status" class="badge badge-red loading">Loading...</span>
       </div>
       <div class="links">
-        <a id="novnc-link" href="#" target="_blank" class="link-btn primary">🖥️ Open noVNC Desktop</a>
-        <a href="/api/status.json" target="_blank" class="link-btn">📊 Raw API</a>
+        <a id="obsweb-link" href="/obs-web/" target="_blank" class="link-btn primary">🎛️ Open OBS Web Remote Control</a>
+        <a id="novnc-link" href="#" target="_blank" class="link-btn">🖥️ Open noVNC Desktop</a>
+        <a href="/api/status.json" target="_blank" class="link-btn">📊 System Status API</a>
       </div>
     </div>
   </div>
@@ -638,6 +723,7 @@ cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
         obsEl.textContent = d.obs.status === 'running' ? '● Running' : '● Stopped';
         document.getElementById('obs-pid').textContent = d.obs.pid || '—';
         document.getElementById('obs-uptime').textContent = d.obs.uptime || '—';
+        document.getElementById('obs-ws-port').textContent = d.obs.websocket_port || 4455;
 
         // GPU
         document.getElementById('gpu-info').textContent = d.gpu.info;
@@ -654,6 +740,10 @@ cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
         document.getElementById('disk-usage').textContent = d.system.disk_recordings;
 
         // Services
+        const ldmEl = document.getElementById('lightdm-status');
+        ldmEl.className = d.services.lightdm === 'running' ? 'badge badge-green' : 'badge badge-red';
+        ldmEl.textContent = d.services.lightdm === 'running' ? '● Running' : '● Stopped';
+
         const vncEl = document.getElementById('vnc-status');
         vncEl.className = d.services.vnc === 'running' ? 'badge badge-green' : 'badge badge-red';
         vncEl.textContent = d.services.vnc === 'running' ? '● Running' : '● Stopped';
@@ -674,7 +764,7 @@ cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
 </html>
 HTMLEOF
 
-# Nginx configuration for dashboard
+# Nginx configuration for dashboard (listening on port 8888)
 cat <<EOF >/etc/nginx/sites-available/obs-dashboard
 server {
     listen ${OBS_DASHBOARD_PORT};
@@ -691,6 +781,14 @@ server {
         add_header Cache-Control "no-cache, no-store, must-revalidate";
         add_header Access-Control-Allow-Origin "*";
     }
+
+    location /ws {
+        proxy_pass http://127.0.0.1:${OBS_WEBSOCKET_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header Host \$host;
+    }
 }
 EOF
 
@@ -700,13 +798,13 @@ rm -f /etc/nginx/sites-enabled/default
 # Generate initial status
 /usr/local/bin/obs-status-update.sh
 
-# Cron job for status updates (every 30 seconds via two cron entries)
+# Cron job for status updates (every 30 seconds)
 cat <<'EOF' >/etc/cron.d/obs-status
 * * * * * root /usr/local/bin/obs-status-update.sh >/dev/null 2>&1
 * * * * * root sleep 30 && /usr/local/bin/obs-status-update.sh >/dev/null 2>&1
 EOF
 
-msg_ok "Set up Status Dashboard"
+msg_ok "Set up OBS Web Dashboard & Control Panel"
 
 # ==============================================================================
 # SYSTEMD SERVICES
@@ -716,8 +814,8 @@ msg_info "Creating Services"
 # Main OBS web desktop service
 cat <<EOF >/etc/systemd/system/obs-web.service
 [Unit]
-Description=OBS Studio Headless Web Desktop
-After=network.target
+Description=OBS Studio Headless Web Desktop & Auto-Stream
+After=network.target lightdm.service
 
 [Service]
 Type=simple
@@ -732,9 +830,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-# Dashboard nginx service (using default nginx service)
 systemctl enable -q --now obs-web.service
 systemctl enable -q --now nginx
+systemctl restart nginx || true
 msg_ok "Created Services"
 
 motd_ssh

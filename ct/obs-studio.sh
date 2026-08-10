@@ -4,6 +4,13 @@ source <(curl -fsSL https://raw.githubusercontent.com/24dubstep/ProxmoxVE-Helper
 # Author: Mcanon
 # License: MIT | https://github.com/24dubstep/ProxmoxVE-Helper-Scripts/raw/main/LICENSE
 # Source: https://obsproject.com/
+# Source: https://github.com/Niek/obs-web
+# Source: https://github.com/obsproject/obs-websocket
+# Source: https://github.com/novnc/noVNC
+# Source: https://github.com/LibVNC/x11vnc
+# Source: https://github.com/canonical/lightdm
+# Source: https://openbox.org/
+# Source: https://www.nginx.com/
 
 APP="OBS-Studio"
 var_tags="${var_tags:-media;streaming;headless;gpu}"
@@ -15,7 +22,19 @@ var_version="${var_version:-24.04}"
 var_unprivileged="${var_unprivileged:-1}"
 var_gpu="${var_gpu:-yes}"
 
-header_info "$APP"
+function header_info() {
+  clear
+  cat << "EOF"
+[32m   ____  ____  _____     _____ __            ___      [0m
+[32m  / __ \/ __ )/ ___/    / ___// /___  ______/ (_)___  [0m
+[32m / / / / __  /\__ \     \__ \/ __/ / / / __  / / __ \ [0m
+[32m/ /_/ / /_/ /___/ /    ___/ / /_/ /_/ / /_/ / / /_/ / [0m
+[32m\____/_____//____/    /____/\__/\__,_/\__,_/_/\____/  [0m
+                                                      
+EOF
+}
+
+header_info
 variables
 color
 catch_errors
@@ -111,8 +130,11 @@ else
   echo -e "${TAB}${INFO}${YW}You can push a driver later: pct push ${CTID} /path/to/driver.deb /tmp/driver.deb${CL}"
 fi
 
-# Restart OBS service to pick up driver changes
-pct exec "${CTID}" -- bash -c "systemctl restart obs-web.service 2>/dev/null" || true
+# Re-verify obs-studio package presence in case purging removed it
+pct exec "${CTID}" -- bash -c "which obs >/dev/null 2>&1 || (apt-get update && apt-get install -y obs-studio)" 2>/dev/null || true
+
+# Restart services and update dashboard status
+pct exec "${CTID}" -- bash -c "systemctl restart nginx obs-web.service && /usr/local/bin/obs-status-update.sh" 2>/dev/null || true
 
 description
 
