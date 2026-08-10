@@ -45,6 +45,72 @@ function update_script() {
 
 start
 build_container
+
+# ==============================================================================
+# GPU DRIVER PUSH (host → container)
+# ==============================================================================
+echo -e "\n${INFO}${YW}GPU Driver Installation${CL}"
+echo -e "${TAB}${INFO}${YW}If you have a GPU driver package (.deb or .run) for the LXC guest,${CL}"
+echo -e "${TAB}${INFO}${YW}provide the path on the Proxmox host to push it into the container.${CL}"
+echo -e "${TAB}${INFO}${YW}Leave empty to skip.${CL}\n"
+
+read -r -p "${TAB}Enter GPU driver file path (or press Enter to skip): " GPU_DRIVER_PATH
+
+if [[ -n "${GPU_DRIVER_PATH}" ]]; then
+  # Trim whitespace
+  GPU_DRIVER_PATH="$(echo "${GPU_DRIVER_PATH}" | xargs)"
+
+  if [[ ! -f "${GPU_DRIVER_PATH}" ]]; then
+    msg_error "File not found: ${GPU_DRIVER_PATH}"
+    echo -e "${TAB}${INFO}${YW}Skipping GPU driver installation. You can install it manually later.${CL}"
+  else
+    GPU_DRIVER_FILENAME="$(basename "${GPU_DRIVER_PATH}")"
+    GPU_DRIVER_EXT="${GPU_DRIVER_FILENAME##*.}"
+    DRIVER_DEST="/tmp/${GPU_DRIVER_FILENAME}"
+
+    msg_info "Pushing GPU driver into container ${CTID}"
+    if pct push "${CTID}" "${GPU_DRIVER_PATH}" "${DRIVER_DEST}" >/dev/null 2>&1; then
+      msg_ok "Pushed ${GPU_DRIVER_FILENAME} into container"
+
+      msg_info "Installing GPU driver in container"
+      case "${GPU_DRIVER_EXT}" in
+        deb)
+          pct exec "${CTID}" -- bash -c "dpkg -i '${DRIVER_DEST}' 2>&1 || apt-get install -f -y 2>&1" >/dev/null 2>&1
+          ;;
+        run)
+          pct exec "${CTID}" -- bash -c "chmod +x '${DRIVER_DEST}' && '${DRIVER_DEST}' --no-kernel-module --silent 2>&1" >/dev/null 2>&1
+          ;;
+        *)
+          msg_warn "Unknown driver format '.${GPU_DRIVER_EXT}' — pushed to ${DRIVER_DEST} but not auto-installed"
+          msg_info "Install it manually: pct exec ${CTID} -- bash -c 'your-install-command ${DRIVER_DEST}'"
+          ;;
+      esac
+
+      # Verify installation
+      if pct exec "${CTID}" -- bash -c "ls /dev/dri/renderD* >/dev/null 2>&1" 2>/dev/null; then
+        msg_ok "GPU driver installed successfully (render device detected)"
+      else
+        msg_warn "GPU driver pushed and install attempted — verify GPU passthrough in LXC config"
+        echo -e "${TAB}${INFO}${YW}Make sure your LXC config has GPU passthrough enabled:${CL}"
+        echo -e "${TAB}${BGN}  lxc.cgroup2.devices.allow: c 226:* rwm${CL}"
+        echo -e "${TAB}${BGN}  lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir${CL}"
+      fi
+
+      # Cleanup pushed file
+      pct exec "${CTID}" -- rm -f "${DRIVER_DEST}" 2>/dev/null || true
+    else
+      msg_error "Failed to push driver file into container"
+      echo -e "${TAB}${INFO}${YW}You can push it manually: pct push ${CTID} '${GPU_DRIVER_PATH}' ${DRIVER_DEST}${CL}"
+    fi
+  fi
+else
+  echo -e "${TAB}${INFO}${YW}No GPU driver specified — skipping.${CL}"
+  echo -e "${TAB}${INFO}${YW}You can push a driver later: pct push ${CTID} /path/to/driver.deb /tmp/driver.deb${CL}"
+fi
+
+# Restart OBS service to pick up driver changes
+pct exec "${CTID}" -- bash -c "systemctl restart obs-web.service 2>/dev/null" || true
+
 description
 
 msg_ok "Completed successfully!\n"
