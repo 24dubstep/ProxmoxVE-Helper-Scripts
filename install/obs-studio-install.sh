@@ -147,6 +147,11 @@ case "${GPU_ENCODER}" in
     ;;
 esac
 
+STREAM_TYPE_SETTING="StreamType=rtmp_common"
+if [[ -f /etc/restreamer.env ]]; then
+  STREAM_TYPE_SETTING="StreamType=rtmp_custom\nURL=rtmp://127.0.0.1:1935/live\nKey=stream"
+fi
+
 # basic.ini — OBS profile configuration
 cat <<EOF >"${OBS_PROFILE}/basic.ini"
 [General]
@@ -177,7 +182,7 @@ StreamEncoder=${STREAM_ENCODER}
 FFOutputToFile=true
 
 [Stream]
-StreamType=rtmp_common
+$(echo -e "${STREAM_TYPE_SETTING}")
 EOF
 
 # Scene collection — default scene with display capture
@@ -322,19 +327,28 @@ cat <<EOF >/usr/local/bin/start-obs-web.sh
 #!/usr/bin/env bash
 export DISPLAY=${OBS_DISPLAY}
 export HOME=/root
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+export QT_QPA_PLATFORM=xcb
+export PULSE_SERVER=unix:/tmp/pulseaudio.socket
 
-DISP_NUM="\${OBS_DISPLAY#:}"
-rm -f /tmp/.X\${DISP_NUM}-lock /tmp/.X11-unix/X\${DISP_NUM}
+mkdir -p /tmp/runtime-root /tmp/.X11-unix /root/recordings
+chmod 700 /tmp/runtime-root
+chmod 1777 /tmp/.X11-unix
+
+DISP_NUM="${OBS_DISPLAY#:}"
+rm -f "/tmp/.X\${DISP_NUM}-lock" "/tmp/.X11-unix/X\${DISP_NUM}"
 
 # Start virtual framebuffer if LightDM/Xorg isn't running
-if ! pgrep -x Xvfb >/dev/null && ! pgrep -x Xorg >/dev/null; then
+if ! pgrep -f "Xvfb|Xorg|lightdm" >/dev/null; then
   Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 +extension GLX +render -noreset &
   sleep 2
 fi
 
 # Start PulseAudio
-pulseaudio --start --exit-idle-time=-1 2>/dev/null || true
-sleep 1
+if ! pgrep -x pulseaudio >/dev/null; then
+  pulseaudio --start --exit-idle-time=-1 2>/dev/null || true
+  sleep 1
+fi
 
 # Start Openbox
 if ! pgrep -x openbox >/dev/null; then
@@ -343,8 +357,8 @@ if ! pgrep -x openbox >/dev/null; then
 fi
 
 # Start x11vnc
-if ! pgrep -x x11vnc >/dev/null; then
-  x11vnc -display ${OBS_DISPLAY} -forever -shared -nopw -rfbport ${OBS_VNC_PORT} -bg 2>/dev/null || true
+if ! pgrep -f "x11vnc" >/dev/null; then
+  x11vnc -display ${OBS_DISPLAY} -forever -shared -nopw -rfbport ${OBS_VNC_PORT} -bg -o /var/log/x11vnc.log 2>/dev/null || true
   sleep 1
 fi
 
@@ -356,7 +370,7 @@ fi
 
 # Launch OBS Studio in persistent monitor loop
 while true; do
-  if ! pgrep -x obs >/dev/null; then
+  if ! pgrep -f "bin/obs" >/dev/null && ! pgrep -x obs >/dev/null; then
     obs --profile "Headless" --collection "Headless" --startstreaming >>/var/log/obs-studio.log 2>&1 || \
     obs --profile "Headless" --collection "Headless" >>/var/log/obs-studio.log 2>&1 || \
     obs >>/var/log/obs-studio.log 2>&1
@@ -375,9 +389,19 @@ msg_info "Setting up OBS Web Dashboard & Control Panel"
 
 mkdir -p /var/www/obs-dashboard /var/www/obs-dashboard/api /var/www/obs-dashboard/obs-web
 
-# Fetch Niek's pre-built OBS-Web frontend
+# Fetch Niek's pre-built OBS-Web frontend (gh-pages)
 if command -v git >/dev/null 2>&1; then
   git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /var/www/obs-dashboard/obs-web 2>/dev/null || true
+fi
+
+if [[ ! -f /var/www/obs-dashboard/obs-web/index.html ]]; then
+  mkdir -p /tmp/obs-web-dl
+  curl -fsSL https://github.com/Niek/obs-web/archive/refs/heads/gh-pages.tar.gz -o /tmp/obs-web.tar.gz 2>/dev/null || true
+  if [[ -f /tmp/obs-web.tar.gz ]]; then
+    tar -xzf /tmp/obs-web.tar.gz -C /tmp/obs-web-dl --strip-components=1 2>/dev/null || true
+    cp -r /tmp/obs-web-dl/* /var/www/obs-dashboard/obs-web/ 2>/dev/null || true
+    rm -rf /tmp/obs-web-dl /tmp/obs-web.tar.gz
+  fi
 fi
 
 # Status update script (called by cron and on-demand)
@@ -385,7 +409,10 @@ cat <<'STATUSEOF' >/usr/local/bin/obs-status-update.sh
 #!/usr/bin/env bash
 # Generates /var/www/obs-dashboard/api/status.json
 
-OBS_PID=$(pgrep -x obs 2>/dev/null || echo "")
+OBS_PID=$(pgrep -f "bin/obs" 2>/dev/null | head -n1)
+if [[ -z "${OBS_PID}" ]]; then
+  OBS_PID=$(pgrep -x obs 2>/dev/null | head -n1 || echo "")
+fi
 OBS_STATUS="stopped"
 OBS_UPTIME=""
 
@@ -407,19 +434,19 @@ if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
 fi
 
 # System resources
-CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' 2>/dev/null || echo "N/A")
+CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' 2>/dev/null || echo "0")
 MEM_TOTAL=$(free -m | awk '/Mem:/{print $2}' 2>/dev/null || echo "0")
 MEM_USED=$(free -m | awk '/Mem:/{print $3}' 2>/dev/null || echo "0")
 DISK_USAGE=$(df -h /root/recordings 2>/dev/null | awk 'NR==2{print $5}' || echo "N/A")
 
 # VNC & LightDM status
 VNC_STATUS="stopped"
-if pgrep -x x11vnc &>/dev/null; then
+if pgrep -f "x11vnc" &>/dev/null; then
   VNC_STATUS="running"
 fi
 
 LIGHTDM_STATUS="stopped"
-if pgrep -x lightdm &>/dev/null || pgrep -x Xvfb &>/dev/null; then
+if pgrep -f "Xvfb|Xorg|lightdm" &>/dev/null; then
   LIGHTDM_STATUS="running"
 fi
 
@@ -701,6 +728,7 @@ cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
       </div>
       <div class="links">
         <a id="obsweb-link" href="/obs-web/" target="_blank" class="link-btn primary">🎛️ Open OBS Web Remote Control</a>
+        <a id="restreamer-link" href="#" target="_blank" class="link-btn primary">📡 Open Restreamer Interface</a>
         <a id="novnc-link" href="#" target="_blank" class="link-btn">🖥️ Open noVNC Desktop</a>
         <a href="/api/status.json" target="_blank" class="link-btn">📊 System Status API</a>
       </div>
@@ -748,6 +776,9 @@ cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
         vncEl.className = d.services.vnc === 'running' ? 'badge badge-green' : 'badge badge-red';
         vncEl.textContent = d.services.vnc === 'running' ? '● Running' : '● Stopped';
         document.getElementById('novnc-link').href = d.services.novnc_url;
+        
+        const hostIp = d.services.novnc_url ? d.services.novnc_url.split(':')[1].replace('//', '') : 'localhost';
+        document.getElementById('restreamer-link').href = 'http://' + hostIp + ':8080';
 
         // Timestamp
         document.getElementById('last-update').textContent =
@@ -775,6 +806,18 @@ server {
 
     location / {
         try_files \$uri \$uri/ =404;
+    }
+
+    # SvelteKit _app assets for obs-web
+    location /_app/ {
+        alias /var/www/obs-dashboard/obs-web/_app/;
+        expires 30d;
+        add_header Cache-Control "public, no-transform";
+    }
+
+    location /obs-web/ {
+        alias /var/www/obs-dashboard/obs-web/;
+        try_files \$uri \$uri/ /obs-web/index.html;
     }
 
     location /api/ {
@@ -805,6 +848,91 @@ cat <<'EOF' >/etc/cron.d/obs-status
 EOF
 
 msg_ok "Set up OBS Web Dashboard & Control Panel"
+
+# ==============================================================================
+# RESTREAMER INTEGRATION INSTALLATION (IF REQUESTED)
+# ==============================================================================
+if [[ -f /etc/restreamer.env ]]; then
+  msg_info "Installing Datarhei Restreamer Integration"
+  $STD apt-get install -y ca-certificates curl gnupg lsb-release
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null || true
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs 2>/dev/null || echo "noble") stable" > /etc/apt/sources.list.d/docker.list
+
+  $STD apt-get update
+  $STD apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || true
+  curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+  $STD apt-get update
+  $STD apt-get install -y nvidia-container-toolkit 2>/dev/null || true
+  nvidia-ctk runtime configure --runtime=docker >/dev/null 2>&1 || true
+  systemctl restart docker >/dev/null 2>&1 || true
+
+  cat <<'EOF' >/usr/local/bin/start-restreamer.sh
+#!/usr/bin/env bash
+export HOME=/root
+
+if [[ -f /etc/restreamer.env ]]; then
+  source /etc/restreamer.env
+fi
+
+RS_USERNAME="${RS_USERNAME:-admin}"
+RS_PASSWORD="${RS_PASSWORD:-admin123}"
+
+DOCKER_IMAGE="datarhei/restreamer:latest"
+GPU_FLAGS=()
+
+if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+  DOCKER_IMAGE="datarhei/restreamer:cuda-latest"
+  GPU_FLAGS+=("--gpus" "all")
+elif [[ -e /dev/dri/renderD128 ]]; then
+  DOCKER_IMAGE="datarhei/restreamer:vaapi-latest"
+  GPU_FLAGS+=("--device" "/dev/dri:/dev/dri")
+fi
+
+mkdir -p /opt/restreamer/config /opt/restreamer/data
+docker stop restreamer >/dev/null 2>&1 || true
+docker rm restreamer >/dev/null 2>&1 || true
+docker pull "${DOCKER_IMAGE}" || true
+
+exec docker run --rm --name restreamer \
+  "${GPU_FLAGS[@]}" \
+  --privileged \
+  -e "RS_USERNAME=${RS_USERNAME}" \
+  -e "RS_PASSWORD=${RS_PASSWORD}" \
+  -v /opt/restreamer/config:/core/config \
+  -v /opt/restreamer/data:/core/data \
+  -p 8080:8080 \
+  -p 8181:8181 \
+  -p 1935:1935 \
+  -p 1936:1936 \
+  -p 6000:6000/udp \
+  "${DOCKER_IMAGE}"
+EOF
+  chmod +x /usr/local/bin/start-restreamer.sh
+
+  cat <<EOF >/etc/systemd/system/restreamer.service
+[Unit]
+Description=Datarhei Restreamer Container
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/start-restreamer.sh
+ExecStop=/usr/bin/docker stop restreamer
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl enable -q --now restreamer.service
+  msg_ok "Installed Datarhei Restreamer Integration"
+fi
 
 # ==============================================================================
 # SYSTEMD SERVICES

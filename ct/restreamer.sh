@@ -3,20 +3,17 @@ source <(curl -fsSL https://raw.githubusercontent.com/24dubstep/ProxmoxVE-Helper
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Mcanon
 # License: MIT | https://github.com/24dubstep/ProxmoxVE-Helper-Scripts/raw/main/LICENSE
-# Source: https://obsproject.com/
-# Source: https://github.com/Niek/obs-web
-# Source: https://github.com/obsproject/obs-websocket
-# Source: https://github.com/novnc/noVNC
-# Source: https://github.com/LibVNC/x11vnc
-# Source: https://github.com/canonical/lightdm
-# Source: https://openbox.org/
-# Source: https://www.nginx.com/
+# Source: https://datarhei.org/
+# Source: https://github.com/datarhei/restreamer
+# Source: https://docs.datarhei.com/restreamer/
+# Source: https://www.docker.com/
+# Source: https://github.com/NVIDIA/nvidia-container-toolkit
 
-APP="OBS-Studio"
-var_tags="${var_tags:-media;streaming;headless;gpu}"
-var_cpu="${var_cpu:-6}"
+APP="Restreamer"
+var_tags="${var_tags:-media;streaming;restreamer;gpu}"
+var_cpu="${var_cpu:-4}"
 var_ram="${var_ram:-4096}"
-var_disk="${var_disk:-20}"
+var_disk="${var_disk:-16}"
 var_os="${var_os:-ubuntu}"
 var_version="${var_version:-24.04}"
 var_unprivileged="${var_unprivileged:-1}"
@@ -25,12 +22,12 @@ var_gpu="${var_gpu:-yes}"
 function header_info() {
   clear
   cat << "EOF"
-[32m   ____  ____  _____     _____ __            ___      [0m
-[32m  / __ \/ __ )/ ___/    / ___// /___  ______/ (_)___  [0m
-[32m / / / / __  /\__ \     \__ \/ __/ / / / __  / / __ \ [0m
-[32m/ /_/ / /_/ /___/ /    ___/ / /_/ /_/ / /_/ / / /_/ / [0m
-[32m\____/_____//____/    /____/\__/\__,_/\__,_/_/\____/  [0m
-                                                      
+ [32m  ____           _                                       [0m
+ [32m |  _ \ ___  ___| |_ _ __ ___  __ _ _ __ ___   ___ _ __  [0m
+ [32m | |_) / _ \/ __| __| '__/ _ \/ _` | '_ ` _ \ / _ \ '__| [0m
+ [32m |  _ <  __/\__ \ |_| | |  __/ (_| | | | | | |  __/ |    [0m
+ [32m |_| \_\___||___/\__|_|  \___|\__,_|_| |_| |_|\___|_|    [0m
+                                                        
 EOF
 }
 
@@ -43,22 +40,14 @@ function update_script() {
   header_info
   check_container_storage
   check_container_resources
-  if [[ ! -f /usr/bin/obs ]]; then
+  if ! pct exec "${CTID}" -- docker ps -a | grep -q "restreamer"; then
     msg_error "No ${APP} Installation Found!"
     exit
   fi
   msg_info "Updating ${APP}"
-  $STD apt-get update
-  $STD apt-get --only-upgrade install -y obs-studio
+  pct exec "${CTID}" -- bash -c "docker pull datarhei/restreamer:latest && docker pull datarhei/restreamer:cuda-latest 2>/dev/null || true"
+  pct exec "${CTID}" -- systemctl restart restreamer.service
   msg_ok "Updated ${APP}"
-
-  if [[ -f /var/www/obs-dashboard/index.html ]]; then
-    msg_info "Updating Dashboard Status Data"
-    if [[ -x /usr/local/bin/obs-status-update.sh ]]; then
-      /usr/local/bin/obs-status-update.sh
-    fi
-    msg_ok "Updated Dashboard"
-  fi
   exit
 }
 
@@ -66,36 +55,27 @@ start
 build_container
 
 # ==============================================================================
-# RESTREAMER INTEGRATION PROMPT
+# RESTREAMER ADMIN CREDENTIALS CONFIGURATION
 # ==============================================================================
-echo -e "\n${INFO}${YW}Datarhei Restreamer Integration${CL}"
-echo -e "${TAB}${INFO}${YW}Restreamer can be installed alongside OBS Studio to automatically receive${CL}"
-echo -e "${TAB}${INFO}${YW}the RTMP stream and restream it to YouTube, Twitch, Facebook, or SRT.${CL}"
+echo -e "\n${INFO}${YW}Restreamer Admin Credentials Setup${CL}"
+read -r -p "${TAB}Enter Admin Username [default: admin]: " RESTREAMER_USER
+RESTREAMER_USER="${RESTREAMER_USER:-admin}"
 
-read -r -p "${TAB}Would you like to install Restreamer alongside OBS Studio? [y/N]: " INSTALL_RESTREAMER_INPUT
+read -r -p "${TAB}Enter Admin Password [default: admin123]: " RESTREAMER_PASS
+RESTREAMER_PASS="${RESTREAMER_PASS:-admin123}"
 
-if [[ "${INSTALL_RESTREAMER_INPUT,,}" =~ ^(y|yes)$ ]]; then
-  echo -e "\n${INFO}${YW}Restreamer Admin Credentials Setup${CL}"
-  read -r -p "${TAB}Enter Admin Username [default: admin]: " RESTREAMER_USER
-  RESTREAMER_USER="${RESTREAMER_USER:-admin}"
-
-  read -r -p "${TAB}Enter Admin Password [default: admin123]: " RESTREAMER_PASS
-  RESTREAMER_PASS="${RESTREAMER_PASS:-admin123}"
-
-  pct exec "${CTID}" -- bash -c "cat <<EOF >/etc/restreamer.env
-INSTALL_RESTREAMER=yes
+# Save credentials into LXC environment script
+pct exec "${CTID}" -- bash -c "cat <<EOF >/etc/restreamer.env
 RS_USERNAME=${RESTREAMER_USER}
 RS_PASSWORD=${RESTREAMER_PASS}
 EOF"
-  msg_ok "Configured Restreamer credentials for CT ${CTID}"
-fi
 
 # ==============================================================================
 # GPU DRIVER PUSH (host → container)
 # ==============================================================================
 DEFAULT_GPU_DRIVER="/root/proxmox-vgpu-installer/guest-drivers/16.9_535.230.02/NVIDIA-Linux-x86_64-535.230.02-grid.run"
 
-echo -e "\n${INFO}${YW}GPU Driver Installation${CL}"
+echo -e "\n${INFO}${YW}GPU Driver Installation (CUDA / NVENC)${CL}"
 echo -e "${TAB}${INFO}${YW}If you have a GPU driver package (.deb or .run) for the LXC guest,${CL}"
 echo -e "${TAB}${INFO}${YW}provide the path on the Proxmox host to push it into the container.${CL}"
 
@@ -119,7 +99,7 @@ if [[ -n "${GPU_DRIVER_PATH}" ]]; then
       msg_info "Cleaning conflicting apt NVIDIA packages in container"
       pct exec "${CTID}" -- bash -c "apt-get remove --purge -y '*nvidia*' '*cuda*' 2>/dev/null || true" >/dev/null 2>&1
 
-      msg_info "Installing GPU driver in container"
+      msg_info "Installing GPU driver with CUDA support in container"
       case "${GPU_DRIVER_EXT}" in
         deb)
           pct exec "${CTID}" -- bash -c "dpkg -i '${DRIVER_DEST}' 2>&1 || apt-get install -f -y 2>&1" >/dev/null 2>&1
@@ -129,44 +109,39 @@ if [[ -n "${GPU_DRIVER_PATH}" ]]; then
           ;;
         *)
           msg_warn "Unknown driver format '.${GPU_DRIVER_EXT}' — pushed to ${DRIVER_DEST} but not auto-installed"
-          msg_info "Install it manually: pct exec ${CTID} -- bash -c 'your-install-command ${DRIVER_DEST}'"
           ;;
       esac
 
+      # Configure NVIDIA Container Toolkit inside LXC
+      pct exec "${CTID}" -- bash -c "nvidia-ctk runtime configure --runtime=docker 2>/dev/null && systemctl restart docker 2>/dev/null" || true
+
       # Verify installation
       if pct exec "${CTID}" -- bash -c "nvidia-smi >/dev/null 2>&1 || ls /dev/dri/renderD* >/dev/null 2>&1" 2>/dev/null; then
-        msg_ok "GPU driver installed successfully"
+        msg_ok "GPU driver and CUDA support installed successfully"
       else
         msg_warn "GPU driver pushed and install attempted — verify GPU passthrough in LXC config"
-        echo -e "${TAB}${INFO}${YW}Make sure your LXC config has GPU passthrough enabled:${CL}"
-        echo -e "${TAB}${BGN}  lxc.cgroup2.devices.allow: c 226:* rwm${CL}"
-        echo -e "${TAB}${BGN}  lxc.mount.entry: /dev/dri dev/dri none bind,optional,create=dir${CL}"
       fi
 
       # Cleanup pushed file
       pct exec "${CTID}" -- rm -f "${DRIVER_DEST}" 2>/dev/null || true
     else
       msg_error "Failed to push driver file into container"
-      echo -e "${TAB}${INFO}${YW}You can push it manually: pct push ${CTID} '${GPU_DRIVER_PATH}' ${DRIVER_DEST}${CL}"
     fi
   fi
 else
   echo -e "${TAB}${INFO}${YW}No GPU driver specified — skipping.${CL}"
-  echo -e "${TAB}${INFO}${YW}You can push a driver later: pct push ${CTID} /path/to/driver.deb /tmp/driver.deb${CL}"
 fi
 
-# Re-verify obs-studio package and obs-web files presence
-pct exec "${CTID}" -- bash -c "which obs >/dev/null 2>&1 || (apt-get update && apt-get install -y obs-studio)" 2>/dev/null || true
-pct exec "${CTID}" -- bash -c "if [ ! -f /var/www/obs-dashboard/obs-web/index.html ]; then git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /var/www/obs-dashboard/obs-web 2>/dev/null || true; fi" 2>/dev/null || true
-
-# Restart services and update dashboard status
-pct exec "${CTID}" -- bash -c "systemctl restart nginx obs-web.service && /usr/local/bin/obs-status-update.sh" 2>/dev/null || true
+# Restart Restreamer service to pick up driver & credential changes
+pct exec "${CTID}" -- bash -c "systemctl restart restreamer.service 2>/dev/null" || true
 
 description
 
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-echo -e "${INFO}${YW}Access noVNC Desktop:${CL}"
+echo -e "${INFO}${YW}Access Restreamer Web Interface:${CL}"
 echo -e "${GATEWAY}${BGN}http://${IP}:8080${CL}"
-echo -e "${INFO}${YW}Access Status Dashboard:${CL}"
-echo -e "${GATEWAY}${BGN}http://${IP}:8888${CL}"
+echo -e "${INFO}${YW}Admin Username:${CL} ${BGN}${RESTREAMER_USER}${CL}"
+echo -e "${INFO}${YW}Admin Password:${CL} ${BGN}${RESTREAMER_PASS}${CL}"
+echo -e "${INFO}${YW}RTMP Ingest URL:${CL}"
+echo -e "${GATEWAY}${BGN}rtmp://${IP}:1935/live/stream${CL}"
