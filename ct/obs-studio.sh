@@ -72,13 +72,16 @@ if [[ -n "${GPU_DRIVER_PATH}" ]]; then
     if pct push "${CTID}" "${GPU_DRIVER_PATH}" "${DRIVER_DEST}" >/dev/null 2>&1; then
       msg_ok "Pushed ${GPU_DRIVER_FILENAME} into container"
 
+      msg_info "Cleaning conflicting apt NVIDIA packages in container"
+      pct exec "${CTID}" -- bash -c "apt-get remove --purge -y '*nvidia*' '*cuda*' 2>/dev/null || true" >/dev/null 2>&1
+
       msg_info "Installing GPU driver in container"
       case "${GPU_DRIVER_EXT}" in
         deb)
           pct exec "${CTID}" -- bash -c "dpkg -i '${DRIVER_DEST}' 2>&1 || apt-get install -f -y 2>&1" >/dev/null 2>&1
           ;;
         run)
-          pct exec "${CTID}" -- bash -c "chmod +x '${DRIVER_DEST}' && '${DRIVER_DEST}' --no-kernel-module --ui=none --no-drm --no-x-check 2>&1" >/dev/null 2>&1
+          pct exec "${CTID}" -- bash -c "chmod +x '${DRIVER_DEST}' && '${DRIVER_DEST}' -s --accept-license --no-kernel-module --ui=none --no-drm --no-x-check --no-nouveau-check --silent 2>&1" >/dev/null 2>&1
           ;;
         *)
           msg_warn "Unknown driver format '.${GPU_DRIVER_EXT}' — pushed to ${DRIVER_DEST} but not auto-installed"
@@ -87,8 +90,8 @@ if [[ -n "${GPU_DRIVER_PATH}" ]]; then
       esac
 
       # Verify installation
-      if pct exec "${CTID}" -- bash -c "ls /dev/dri/renderD* >/dev/null 2>&1" 2>/dev/null; then
-        msg_ok "GPU driver installed successfully (render device detected)"
+      if pct exec "${CTID}" -- bash -c "nvidia-smi >/dev/null 2>&1 || ls /dev/dri/renderD* >/dev/null 2>&1" 2>/dev/null; then
+        msg_ok "GPU driver installed successfully"
       else
         msg_warn "GPU driver pushed and install attempted — verify GPU passthrough in LXC config"
         echo -e "${TAB}${INFO}${YW}Make sure your LXC config has GPU passthrough enabled:${CL}"
