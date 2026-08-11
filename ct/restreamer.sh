@@ -157,13 +157,41 @@ fi
 # Restart Restreamer service AFTER GPU driver installation
 pct exec "${CTID}" -- bash -c "systemctl restart restreamer.service 2>/dev/null" || true
 
+# Update credentials.txt with container IP and credentials
+pct exec "${CTID}" -- bash -c "cat <<EOF >/opt/restreamer/credentials.txt
+==============================================================================
+  Datarhei Restreamer LXC — Credentials & Access Info
+==============================================================================
+
+[Access URLs & Ports]
+- Restreamer Web Interface:        http://${IP}:8080
+- Restreamer HTTPS Interface:      https://${IP}:8181
+- RTMP Stream Ingest URL:           rtmp://${IP}:1935/live/stream
+- RTMPS Ingest URL:                 rtmps://${IP}:1936/live/stream
+- SRT Stream Ingest URL:            srt://${IP}:6000
+
+[Admin Login Credentials]
+- Username:                         ${RESTREAMER_USER}
+- Password:                         ${RESTREAMER_PASS}
+
+[Storage Directories]
+- Restreamer Application Root:      /opt/restreamer
+- Configuration Directory:          /opt/restreamer/config
+- Data Volume Directory:            /opt/restreamer/data
+- Launcher Script:                  /opt/restreamer/scripts/start-restreamer.sh
+- Credentials File:                 /opt/restreamer/credentials.txt
+==============================================================================
+EOF" 2>/dev/null || true
+
 description
 
 msg_ok "Completed successfully!\n"
-echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-echo -e "${INFO}${YW}Access Restreamer Web Interface:${CL}"
-echo -e "${GATEWAY}${BGN}http://${IP}:8080${CL}"
-echo -e "${INFO}${YW}Admin Username:${CL} ${BGN}${RESTREAMER_USER}${CL}"
-echo -e "${INFO}${YW}Admin Password:${CL} ${BGN}${RESTREAMER_PASS}${CL}"
-echo -e "${INFO}${YW}RTMP Ingest URL:${CL}"
-echo -e "${GATEWAY}${BGN}rtmp://${IP}:1935/live/stream${CL}"
+echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}\n"
+echo -e "${TAB}──────────────────────────────────────────────────────────────────"
+echo -e "${TAB}${INFO}${YW} Restreamer Web Interface:${CL} ${GATEWAY}${BGN}http://${IP}:8080${CL}"
+echo -e "${TAB}${INFO}${YW} Admin Username:${CL}           ${GATEWAY}${BGN}${RESTREAMER_USER}${CL}"
+echo -e "${TAB}${INFO}${YW} Admin Password:${CL}           ${GATEWAY}${BGN}${RESTREAMER_PASS}${CL}"
+echo -e "${TAB}${INFO}${YW} RTMP Stream Ingest URL:${CL}   ${GATEWAY}${BGN}rtmp://${IP}:1935/live/stream${CL}"
+echo -e "${TAB}${INFO}${YW} SRT Stream Ingest URL:${CL}    ${GATEWAY}${BGN}srt://${IP}:6000${CL}"
+echo -e "${TAB}${INFO}${YW} System Credentials File:${CL}  ${GATEWAY}${BGN}/opt/restreamer/credentials.txt${CL}"
+echo -e "${TAB}──────────────────────────────────────────────────────────────────\n"

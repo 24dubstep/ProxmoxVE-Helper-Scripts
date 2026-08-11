@@ -27,7 +27,7 @@ OBS_RESOLUTION="${OBS_RESOLUTION:-1920x1080}"
 OBS_FPS="${OBS_FPS:-30}"
 OBS_DISPLAY="${OBS_DISPLAY:-:0}"
 OBS_VNC_PORT="${OBS_VNC_PORT:-5900}"
-OBS_NOVNC_PORT="${OBS_NOVNC_PORT:-8080}"
+OBS_NOVNC_PORT="${OBS_NOVNC_PORT:-8081}"
 OBS_DASHBOARD_PORT="${OBS_DASHBOARD_PORT:-8888}"
 OBS_WEBSOCKET_PORT="${OBS_WEBSOCKET_PORT:-4455}"
 
@@ -102,7 +102,10 @@ msg_info "Detecting GPU Encoder"
 GPU_ENCODER="x264"
 GPU_INFO="Software (x264)"
 
-if [[ -e /dev/dri/renderD128 ]]; then
+if (command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null) || ls /dev/nvidia* &>/dev/null || (command -v lspci &>/dev/null && lspci 2>/dev/null | grep -qi "nvidia"); then
+  GPU_ENCODER="nvenc"
+  GPU_INFO="NVENC (NVIDIA GPU)"
+elif [[ -e /dev/dri/renderD128 ]]; then
   if command -v vainfo &>/dev/null && vainfo 2>/dev/null | grep -qi "vaapi"; then
     GPU_ENCODER="vaapi"
     GPU_INFO="VAAPI (Intel/AMD GPU)"
@@ -110,11 +113,6 @@ if [[ -e /dev/dri/renderD128 ]]; then
     GPU_ENCODER="vaapi"
     GPU_INFO="VAAPI (GPU detected)"
   fi
-fi
-
-if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
-  GPU_ENCODER="nvenc"
-  GPU_INFO="NVENC (NVIDIA GPU)"
 fi
 
 msg_ok "Detected GPU Encoder: ${GPU_INFO}"
@@ -341,7 +339,8 @@ msg_info "Configuring VNC & noVNC Web Desktop"
 ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html
 
 # OBS Start Script
-cat <<EOF >/usr/local/bin/start-obs-web.sh
+mkdir -p /opt/obs-studio/scripts /opt/obs-studio/dashboard /opt/obs-studio/recordings
+cat <<EOF >/opt/obs-studio/scripts/start-obs-web.sh
 #!/usr/bin/env bash
 export DISPLAY=${OBS_DISPLAY}
 export HOME=/root
@@ -349,16 +348,21 @@ export XDG_RUNTIME_DIR=/tmp/runtime-root
 export QT_QPA_PLATFORM=xcb
 export PULSE_SERVER=unix:/tmp/pulseaudio.socket
 
-mkdir -p /tmp/runtime-root /tmp/.X11-unix /root/recordings
+mkdir -p /tmp/runtime-root /tmp/.X11-unix /opt/obs-studio/recordings
 chmod 700 /tmp/runtime-root
 chmod 1777 /tmp/.X11-unix
 
 DISP_NUM="${OBS_DISPLAY#:}"
 rm -f "/tmp/.X\${DISP_NUM}-lock" "/tmp/.X11-unix/X\${DISP_NUM}"
 
-# Start virtual framebuffer if LightDM/Xorg isn't running
-if ! pgrep -f "Xvfb|Xorg|lightdm" >/dev/null; then
-  Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 +extension GLX +render -noreset &
+# Ensure D-Bus session bus is running for Qt/OBS
+if [ -z "\${DBUS_SESSION_BUS_ADDRESS}" ]; then
+  eval \$(dbus-launch --sh-syntax --exit-with-session 2>/dev/null || true)
+fi
+
+# Start virtual framebuffer if LightDM/Xorg/Xvfb isn't active on display
+if ! pgrep -f "Xvfb ${OBS_DISPLAY}" >/dev/null && ! pgrep -f "Xorg ${OBS_DISPLAY}" >/dev/null; then
+  Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac +extension GLX +render -noreset &
   sleep 2
 fi
 
@@ -376,13 +380,13 @@ fi
 
 # Start x11vnc
 if ! pgrep -f "x11vnc" >/dev/null; then
-  x11vnc -display ${OBS_DISPLAY} -forever -shared -nopw -rfbport ${OBS_VNC_PORT} -bg -o /var/log/x11vnc.log 2>/dev/null || true
+  x11vnc -display ${OBS_DISPLAY} -forever -shared -nopw -rfbport ${OBS_VNC_PORT} -noxrecord -noxfixes -noxdamage -bg -o /var/log/x11vnc.log 2>/dev/null || true
   sleep 1
 fi
 
-# Start websockify / noVNC
+# Start websockify / noVNC on port 8081
 if ! pgrep -f "websockify" >/dev/null; then
-  websockify --web /usr/share/novnc ${OBS_NOVNC_PORT} localhost:${OBS_VNC_PORT} &
+  websockify --web /usr/share/novnc ${OBS_NOVNC_PORT} 127.0.0.1:${OBS_VNC_PORT} &
   sleep 1
 fi
 
@@ -396,7 +400,8 @@ while true; do
   sleep 3
 done
 EOF
-chmod +x /usr/local/bin/start-obs-web.sh
+chmod +x /opt/obs-studio/scripts/start-obs-web.sh
+ln -sf /opt/obs-studio/scripts/start-obs-web.sh /usr/local/bin/start-obs-web.sh
 
 msg_ok "Configured VNC & noVNC Web Desktop"
 
@@ -405,27 +410,27 @@ msg_ok "Configured VNC & noVNC Web Desktop"
 # ==============================================================================
 msg_info "Setting up OBS Web Dashboard & Control Panel"
 
-mkdir -p /var/www/obs-dashboard /var/www/obs-dashboard/api /var/www/obs-dashboard/obs-web
+mkdir -p /opt/obs-studio/dashboard /opt/obs-studio/dashboard/api /opt/obs-studio/dashboard/obs-web
 
 # Fetch Niek's pre-built OBS-Web frontend (gh-pages)
 if command -v git >/dev/null 2>&1; then
-  git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /var/www/obs-dashboard/obs-web 2>/dev/null || true
+  git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || true
 fi
 
-if [[ ! -f /var/www/obs-dashboard/obs-web/index.html ]]; then
+if [[ ! -f /opt/obs-studio/dashboard/obs-web/index.html ]]; then
   mkdir -p /tmp/obs-web-dl
   curl -fsSL https://github.com/Niek/obs-web/archive/refs/heads/gh-pages.tar.gz -o /tmp/obs-web.tar.gz 2>/dev/null || true
   if [[ -f /tmp/obs-web.tar.gz ]]; then
     tar -xzf /tmp/obs-web.tar.gz -C /tmp/obs-web-dl --strip-components=1 2>/dev/null || true
-    cp -r /tmp/obs-web-dl/* /var/www/obs-dashboard/obs-web/ 2>/dev/null || true
+    cp -r /tmp/obs-web-dl/* /opt/obs-studio/dashboard/obs-web/ 2>/dev/null || true
     rm -rf /tmp/obs-web-dl /tmp/obs-web.tar.gz
   fi
 fi
 
 # Status update script (called by cron and on-demand)
-cat <<'STATUSEOF' >/usr/local/bin/obs-status-update.sh
+cat <<'STATUSEOF' >/opt/obs-studio/scripts/obs-status-update.sh
 #!/usr/bin/env bash
-# Generates /var/www/obs-dashboard/api/status.json
+# Generates /opt/obs-studio/dashboard/api/status.json
 
 OBS_PID=$(pgrep -f "bin/obs" 2>/dev/null | head -n1)
 if [[ -z "${OBS_PID}" ]]; then
@@ -455,7 +460,7 @@ fi
 CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' 2>/dev/null || echo "0")
 MEM_TOTAL=$(free -m | awk '/Mem:/{print $2}' 2>/dev/null || echo "0")
 MEM_USED=$(free -m | awk '/Mem:/{print $3}' 2>/dev/null || echo "0")
-DISK_USAGE=$(df -h /root/recordings 2>/dev/null | awk 'NR==2{print $5}' || echo "N/A")
+DISK_USAGE=$(df -h /opt/obs-studio/recordings 2>/dev/null | awk 'NR==2{print $5}' || echo "N/A")
 
 # VNC & LightDM status
 VNC_STATUS="stopped"
@@ -470,7 +475,7 @@ fi
 
 CONTAINER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown")
 
-cat <<JSONEOF >/var/www/obs-dashboard/api/status.json
+cat <<JSONEOF >/opt/obs-studio/dashboard/api/status.json
 {
   "obs": {
     "status": "${OBS_STATUS}",
@@ -491,16 +496,17 @@ cat <<JSONEOF >/var/www/obs-dashboard/api/status.json
   "services": {
     "lightdm": "${LIGHTDM_STATUS}",
     "vnc": "${VNC_STATUS}",
-    "novnc_url": "http://${CONTAINER_IP}:8080"
+    "novnc_url": "http://${CONTAINER_IP}:8081/vnc.html?autoconnect=true&resize=remote"
   },
   "timestamp": "$(date -Iseconds)"
 }
 JSONEOF
 STATUSEOF
-chmod +x /usr/local/bin/obs-status-update.sh
+chmod +x /opt/obs-studio/scripts/obs-status-update.sh
+ln -sf /opt/obs-studio/scripts/obs-status-update.sh /usr/local/bin/obs-status-update.sh
 
 # Combined Dashboard HTML (System Status + OBS Control Links + WebSocket Controller)
-cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
+cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -793,10 +799,11 @@ cat <<'HTMLEOF' >/var/www/obs-dashboard/index.html
         const vncEl = document.getElementById('vnc-status');
         vncEl.className = d.services.vnc === 'running' ? 'badge badge-green' : 'badge badge-red';
         vncEl.textContent = d.services.vnc === 'running' ? '● Running' : '● Stopped';
-        document.getElementById('novnc-link').href = d.services.novnc_url;
         
-        const hostIp = d.services.novnc_url ? d.services.novnc_url.split(':')[1].replace('//', '') : 'localhost';
-        document.getElementById('restreamer-link').href = 'http://' + hostIp + ':8080';
+        const hostIp = window.location.hostname;
+        document.getElementById('novnc-link').href = 'http://' + hostIp + ':8081/vnc.html?autoconnect=true&resize=remote';
+        document.getElementById('restreamer-link').href = 'http://' + hostIp + ':8080/';
+        document.getElementById('obsweb-link').href = '/obs-web/?host=' + hostIp + ':4455';
 
         // Timestamp
         document.getElementById('last-update').textContent =
@@ -819,23 +826,21 @@ server {
     listen ${OBS_DASHBOARD_PORT};
     server_name _;
 
-    root /var/www/obs-dashboard;
+    root /opt/obs-studio/dashboard;
     index index.html;
 
     location / {
         try_files \$uri \$uri/ =404;
     }
 
-    # SvelteKit _app assets for obs-web
-    location /_app/ {
-        alias /var/www/obs-dashboard/obs-web/_app/;
-        expires 30d;
-        add_header Cache-Control "public, no-transform";
+    location /obs-web {
+        try_files \$uri \$uri/ /obs-web/index.html;
     }
 
-    location /obs-web/ {
-        alias /var/www/obs-dashboard/obs-web/;
-        try_files \$uri \$uri/ /obs-web/index.html;
+    location /_app/ {
+        root /opt/obs-studio/dashboard/obs-web;
+        expires 30d;
+        add_header Cache-Control "public, no-transform";
     }
 
     location /api/ {
@@ -980,6 +985,38 @@ systemctl enable -q --now obs-web.service
 systemctl enable -q --now nginx
 systemctl restart nginx || true
 msg_ok "Created Services"
+
+# Create credentials.txt management file
+CONTAINER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "LXC_IP")
+cat <<EOF >/opt/obs-studio/credentials.txt
+==============================================================================
+  OBS Studio Headless LXC — System Credentials & Access Info
+==============================================================================
+
+[Access URLs & Ports]
+- Status Dashboard & Control Panel: http://${CONTAINER_IP}:8888
+- OBS Web Remote Control:           http://${CONTAINER_IP}:8888/obs-web/
+- noVNC Interactive Web Desktop:    http://${CONTAINER_IP}:8081/vnc.html?autoconnect=true&resize=remote
+- OBS WebSocket Port:               4455 (Auth: Disabled)
+- VNC Direct Server Port:           5900
+
+[Restreamer Live Streaming Engine]
+- Restreamer Web Interface:        http://${CONTAINER_IP}:8080
+- Admin Username:                   admin
+- Admin Password:                   admin123
+- RTMP Stream Ingest URL:           rtmp://${CONTAINER_IP}:1935/live/stream
+- SRT Stream Ingest URL:            srt://${CONTAINER_IP}:6000
+
+[Storage Directories]
+- OBS Application Root:             /opt/obs-studio
+- OBS Recordings Path:              /opt/obs-studio/recordings
+- Dashboard Directory:              /opt/obs-studio/dashboard
+- Restreamer Config Path:           /opt/restreamer/config
+- Restreamer Data Path:             /opt/restreamer/data
+- Credentials File:                 /opt/obs-studio/credentials.txt
+==============================================================================
+EOF
+chmod 644 /opt/obs-studio/credentials.txt
 
 motd_ssh
 customize

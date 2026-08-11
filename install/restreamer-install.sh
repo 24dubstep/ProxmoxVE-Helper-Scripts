@@ -68,13 +68,13 @@ chmod +x /etc/profile.d/cuda.sh
 msg_ok "Installed Docker, NVIDIA Container Toolkit & CUDA 12"
 
 # ==============================================================================
-# RESTREAMER START SCRIPT
+# RESTREAMER START SCRIPT & PATHS
 # ==============================================================================
-msg_info "Configuring Restreamer Service"
+msg_info "Configuring Restreamer Service & Storage Paths"
 
-mkdir -p /opt/restreamer/config /opt/restreamer/data
+mkdir -p /opt/restreamer/config /opt/restreamer/data /opt/restreamer/scripts
 
-cat <<'EOF' >/usr/local/bin/start-restreamer.sh
+cat <<'EOF' >/opt/restreamer/scripts/start-restreamer.sh
 #!/usr/bin/env bash
 export HOME=/root
 
@@ -122,7 +122,8 @@ exec docker run --rm --name restreamer \
   -p 6000:6000/udp \
   "${DOCKER_IMAGE}"
 EOF
-chmod +x /usr/local/bin/start-restreamer.sh
+chmod +x /opt/restreamer/scripts/start-restreamer.sh
+ln -sf /opt/restreamer/scripts/start-restreamer.sh /usr/local/bin/start-restreamer.sh
 
 # ==============================================================================
 # SYSTEMD SERVICE
@@ -135,7 +136,7 @@ Wants=docker.service network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/start-restreamer.sh
+ExecStart=/opt/restreamer/scripts/start-restreamer.sh
 ExecStop=/usr/bin/docker stop restreamer
 Restart=always
 RestartSec=5
@@ -146,6 +147,34 @@ EOF
 
 systemctl enable -q --now restreamer.service
 msg_ok "Configured Restreamer Service"
+
+# Create credentials.txt management file
+CONTAINER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "LXC_IP")
+cat <<EOF >/opt/restreamer/credentials.txt
+==============================================================================
+  Datarhei Restreamer LXC — Credentials & Access Info
+==============================================================================
+
+[Access URLs & Ports]
+- Restreamer Web Interface:        http://${CONTAINER_IP}:8080
+- Restreamer HTTPS Interface:      https://${CONTAINER_IP}:8181
+- RTMP Stream Ingest URL:           rtmp://${CONTAINER_IP}:1935/live/stream
+- RTMPS Ingest URL:                 rtmps://${CONTAINER_IP}:1936/live/stream
+- SRT Stream Ingest URL:            srt://${CONTAINER_IP}:6000
+
+[Admin Login Credentials]
+- Username:                         admin
+- Password:                         admin123
+
+[Storage Directories]
+- Restreamer Application Root:      /opt/restreamer
+- Configuration Directory:          /opt/restreamer/config
+- Data Volume Directory:            /opt/restreamer/data
+- Launcher Script:                  /opt/restreamer/scripts/start-restreamer.sh
+- Credentials File:                 /opt/restreamer/credentials.txt
+==============================================================================
+EOF
+chmod 644 /opt/restreamer/credentials.txt
 
 motd_ssh
 customize

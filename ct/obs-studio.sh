@@ -67,8 +67,18 @@ function update_script() {
 # ==============================================================================
 DEFAULT_GPU_DRIVER="/root/proxmox-vgpu-installer/guest-drivers/16.9_535.230.02/NVIDIA-Linux-x86_64-535.230.02-grid.run"
 
+NVIDIA_GPU_DETECTED=false
+if lspci -nn 2>/dev/null | grep -qi "NVIDIA" || ls /dev/nvidia* &>/dev/null; then
+  NVIDIA_GPU_DETECTED=true
+fi
+
 echo -e "\n${INFO}${YW}GPU Driver Installation (Local .run file)${CL}"
-echo -e "${TAB}${INFO}${YW}Provide host path for guest GPU driver to install BEFORE NVIDIA/CUDA checks.${CL}"
+if [[ "${NVIDIA_GPU_DETECTED}" == "true" ]]; then
+  echo -e "${TAB}${INFO}${GN}NVIDIA GPU hardware detected on host system.${CL}"
+else
+  echo -e "${TAB}${INFO}${YW}No NVIDIA GPU automatically detected on host (or passthrough manual mode).${CL}"
+fi
+echo -e "${TAB}${INFO}${YW}Provide host path for guest GPU driver to install into container.${CL}"
 
 read -r -p "${TAB}Enter GPU driver file path [default: ${DEFAULT_GPU_DRIVER}]: " GPU_DRIVER_INPUT
 GPU_DRIVER_PATH="${GPU_DRIVER_INPUT:-${DEFAULT_GPU_DRIVER}}"
@@ -106,7 +116,7 @@ EOF"
 fi
 
 # ==============================================================================
-# INSTALL LOCAL .RUN GPU DRIVER & CUDA BEFORE VERIFICATION
+# INSTALL LOCAL .RUN GPU DRIVER & CUDA AFTER CARD DETECTION
 # ==============================================================================
 if [[ -n "${GPU_DRIVER_PATH}" ]]; then
   if [[ ! -f "${GPU_DRIVER_PATH}" ]]; then
@@ -143,7 +153,7 @@ CUDAENV
       msg_info "Cleaning conflicting apt NVIDIA driver packages in container"
       pct exec "${CTID}" -- bash -c "apt-get remove --purge -y 'nvidia-driver-*' 'xserver-xorg-video-nvidia-*' 2>/dev/null || true" >/dev/null 2>&1
 
-      # Execute host-matched GPU driver .run file LAST so its libraries remain active
+      # Execute host-matched GPU driver .run/.deb file
       msg_info "Installing host-matched GPU driver (.run file) in container"
       case "${GPU_DRIVER_EXT}" in
         deb)
@@ -157,7 +167,7 @@ CUDAENV
           ;;
       esac
 
-      # Check nvidia-smi AFTER .run installation
+      # Check nvidia-smi AFTER driver file installation to verify
       if pct exec "${CTID}" -- bash -c "nvidia-smi" >/dev/null 2>&1; then
         msg_ok "NVIDIA GPU driver & NVENC verified (nvidia-smi active)"
         # Update OBS profile to use NVENC hardware encoder
@@ -179,7 +189,44 @@ fi
 
 # Re-verify obs-studio package and obs-web files presence
 pct exec "${CTID}" -- bash -c "which obs >/dev/null 2>&1 || (apt-get update && apt-get install -y obs-studio)" 2>/dev/null || true
-pct exec "${CTID}" -- bash -c "if [ ! -f /var/www/obs-dashboard/obs-web/index.html ]; then git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /var/www/obs-dashboard/obs-web 2>/dev/null || true; fi" 2>/dev/null || true
+pct exec "${CTID}" -- bash -c "if [ ! -f /opt/obs-studio/dashboard/obs-web/index.html ]; then git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || true; fi" 2>/dev/null || true
+
+# Update credentials.txt with container IP and credentials
+RS_USER_VAL="N/A"
+RS_PASS_VAL="N/A"
+if pct exec "${CTID}" -- test -f /etc/restreamer.env; then
+  RS_USER_VAL=$(pct exec "${CTID}" -- grep RS_USERNAME /etc/restreamer.env 2>/dev/null | cut -d= -f2 || echo "admin")
+  RS_PASS_VAL=$(pct exec "${CTID}" -- grep RS_PASSWORD /etc/restreamer.env 2>/dev/null | cut -d= -f2 || echo "admin123")
+fi
+
+pct exec "${CTID}" -- bash -c "cat <<EOF >/opt/obs-studio/credentials.txt
+==============================================================================
+  OBS Studio Headless LXC — System Credentials & Access Info
+==============================================================================
+
+[Access URLs & Ports]
+- Status Dashboard & Control Panel: http://${IP}:8888
+- OBS Web Remote Control:           http://${IP}:8888/obs-web/
+- noVNC Interactive Web Desktop:    http://${IP}:8081/vnc.html?autoconnect=true&resize=remote
+- OBS WebSocket Port:               4455 (Auth: Disabled)
+- VNC Direct Server Port:           5900
+
+[Restreamer Live Streaming Engine]
+- Restreamer Web Interface:        http://${IP}:8080
+- Admin Username:                   ${RS_USER_VAL}
+- Admin Password:                   ${RS_PASS_VAL}
+- RTMP Stream Ingest URL:           rtmp://${IP}:1935/live/stream
+- SRT Stream Ingest URL:            srt://${IP}:6000
+
+[Storage Directories]
+- OBS Application Root:             /opt/obs-studio
+- OBS Recordings Path:              /opt/obs-studio/recordings
+- Dashboard Directory:              /opt/obs-studio/dashboard
+- Restreamer Config Path:           /opt/restreamer/config
+- Restreamer Data Path:             /opt/restreamer/data
+- Credentials File:                 /opt/obs-studio/credentials.txt
+==============================================================================
+EOF" 2>/dev/null || true
 
 # Restart services and update dashboard status AFTER driver installation
 pct exec "${CTID}" -- bash -c "systemctl restart nginx obs-web.service && /usr/local/bin/obs-status-update.sh" 2>/dev/null || true
@@ -187,8 +234,16 @@ pct exec "${CTID}" -- bash -c "systemctl restart nginx obs-web.service && /usr/l
 description
 
 msg_ok "Completed successfully!\n"
-echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-echo -e "${INFO}${YW}Access noVNC Desktop:${CL}"
-echo -e "${GATEWAY}${BGN}http://${IP}:8080${CL}"
-echo -e "${INFO}${YW}Access Status Dashboard:${CL}"
-echo -e "${GATEWAY}${BGN}http://${IP}:8888${CL}"
+echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}\n"
+echo -e "${TAB}──────────────────────────────────────────────────────────────────"
+echo -e "${TAB}${INFO}${YW} OBS Status Dashboard:${CL}     ${GATEWAY}${BGN}http://${IP}:8888${CL}"
+echo -e "${TAB}${INFO}${YW} OBS Web Remote Control:${CL}   ${GATEWAY}${BGN}http://${IP}:8888/obs-web/${CL}"
+echo -e "${TAB}${INFO}${YW} noVNC Web Desktop:${CL}        ${GATEWAY}${BGN}http://${IP}:8081/vnc.html?autoconnect=true${CL}"
+echo -e "${TAB}${INFO}${YW} OBS WebSocket Port:${CL}     ${GATEWAY}${BGN}4455 (Auth: Disabled)${CL}"
+if pct exec "${CTID}" -- test -f /etc/restreamer.env; then
+  echo -e "${TAB}${INFO}${YW} Restreamer Web Interface:${CL} ${GATEWAY}${BGN}http://${IP}:8080${CL}"
+  echo -e "${TAB}${INFO}${YW} Restreamer Admin Login:${CL}   ${GATEWAY}${BGN}${RS_USER_VAL} / ${RS_PASS_VAL}${CL}"
+  echo -e "${TAB}${INFO}${YW} RTMP Stream Ingest:${CL}       ${GATEWAY}${BGN}rtmp://${IP}:1935/live/stream${CL}"
+fi
+echo -e "${TAB}${INFO}${YW} System Credentials File:${CL}  ${GATEWAY}${BGN}/opt/obs-studio/credentials.txt${CL}"
+echo -e "${TAB}──────────────────────────────────────────────────────────────────\n"
