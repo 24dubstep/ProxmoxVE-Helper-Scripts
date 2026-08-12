@@ -1616,6 +1616,62 @@ EOF
 ln -sf /etc/nginx/sites-available/obs-dashboard /etc/nginx/sites-enabled/obs-dashboard
 rm -f /etc/nginx/sites-enabled/default
 
+# Create Status Update Script /usr/local/bin/obs-status-update.sh
+cat <<'STATUSEOF' >/usr/local/bin/obs-status-update.sh
+#!/usr/bin/env bash
+mkdir -p /opt/obs-studio/dashboard/api
+
+OBS_STATUS="stopped"
+OBS_PID=""
+OBS_UPTIME=""
+
+if pgrep -f "bin/obs" >/dev/null 2>&1 || pgrep -x obs >/dev/null 2>&1; then
+  OBS_STATUS="running"
+  OBS_PID=$(pgrep -f "bin/obs" 2>/dev/null | head -n1 || pgrep -x obs 2>/dev/null | head -n1 || echo "")
+  if [ -n "$OBS_PID" ]; then
+    OBS_UPTIME=$(ps -p "$OBS_PID" -o etime= 2>/dev/null | xargs 2>/dev/null || echo "active")
+  fi
+fi
+
+GPU_NAME="Software / CPU"
+GPU_ENC="x264 (CPU)"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  NVIDIA_INFO=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null | head -n1 || echo "")
+  if [ -n "$NVIDIA_INFO" ]; then
+    GPU_NAME="$NVIDIA_INFO"
+    GPU_ENC="nvenc (NVIDIA GPU)"
+  fi
+fi
+
+CPU_USAGE=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2 + $4}' 2>/dev/null || echo "0")
+MEM_TOTAL=$(free -m 2>/dev/null | awk '/Mem:/ {print $2}' 2>/dev/null || echo "0")
+MEM_USED=$(free -m 2>/dev/null | awk '/Mem:/ {print $3}' 2>/dev/null || echo "0")
+REC_DISK=$(df -h /opt/obs-studio/recordings 2>/dev/null | tail -n1 | awk '{print $3 "/" $2 " (" $5 ")"}' 2>/dev/null || echo "N/A")
+
+cat <<EOF >/opt/obs-studio/dashboard/api/status.json
+{
+  "timestamp": "$(date -Iseconds 2>/dev/null || date)",
+  "obs": {
+    "status": "${OBS_STATUS}",
+    "pid": "${OBS_PID}",
+    "uptime": "${OBS_UPTIME}",
+    "websocket_port": 4455
+  },
+  "gpu": {
+    "info": "${GPU_NAME}",
+    "encoder": "${GPU_ENC}"
+  },
+  "system": {
+    "cpu_usage": "${CPU_USAGE:-0}",
+    "memory_total_mb": ${MEM_TOTAL:-0},
+    "memory_used_mb": ${MEM_USED:-0},
+    "disk_recordings": "${REC_DISK}"
+  }
+}
+EOF
+STATUSEOF
+chmod +x /usr/local/bin/obs-status-update.sh
+
 # Generate initial status
 /usr/local/bin/obs-status-update.sh
 
