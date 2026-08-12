@@ -362,7 +362,7 @@ fi
 
 # Start virtual framebuffer if LightDM/Xorg/Xvfb isn't active on display
 if ! pgrep -f "Xvfb ${OBS_DISPLAY}" >/dev/null && ! pgrep -f "Xorg ${OBS_DISPLAY}" >/dev/null; then
-  Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac +extension GLX +render -noreset &
+  Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac +render -noreset &
   sleep 2
 fi
 
@@ -392,6 +392,12 @@ fi
 
 # Launch OBS Studio in persistent monitor loop
 while true; do
+  if ! pgrep -f "Xvfb ${OBS_DISPLAY}" >/dev/null && ! pgrep -f "Xorg ${OBS_DISPLAY}" >/dev/null; then
+    rm -f "/tmp/.X\${DISP_NUM}-lock" "/tmp/.X11-unix/X\${DISP_NUM}"
+    Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac +render -noreset &
+    sleep 2
+  fi
+
   if ! pgrep -f "bin/obs" >/dev/null && ! pgrep -x obs >/dev/null; then
     obs --profile "Headless" --collection "Headless" --startstreaming >>/var/log/obs-studio.log 2>&1 || \
     obs --profile "Headless" --collection "Headless" >>/var/log/obs-studio.log 2>&1 || \
