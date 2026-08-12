@@ -130,7 +130,7 @@ autologin-user=root
 autologin-user-timeout=0
 user-session=openbox
 type=local
-xserver-command=Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 +extension GLX +render -noreset
+xserver-command=Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac +render -noreset
 EOF
 
 msg_ok "Configured LightDM & X11 Framebuffer"
