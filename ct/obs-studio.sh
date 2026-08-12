@@ -47,18 +47,18 @@ function update_script() {
     msg_error "No ${APP} Installation Found!"
     exit
   fi
-  msg_info "Updating ${APP}"
+  msg_info "Updating ${APP} Packages & Control Panel"
   $STD apt-get update
   $STD apt-get --only-upgrade install -y obs-studio
-  msg_ok "Updated ${APP}"
-
-  if [[ -f /var/www/obs-dashboard/index.html ]]; then
-    msg_info "Updating Dashboard Status Data"
+  
+  if [[ -x /usr/local/bin/obs-update ]]; then
+    $STD /usr/local/bin/obs-update
+  else
     if [[ -x /usr/local/bin/obs-status-update.sh ]]; then
       /usr/local/bin/obs-status-update.sh
     fi
-    msg_ok "Updated Dashboard"
   fi
+  msg_ok "Updated ${APP} LXC Container Successfully!"
   exit
 }
 

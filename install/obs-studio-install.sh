@@ -1758,7 +1758,41 @@ systemctl enable -q --now obs-dashboard-api.service
 systemctl enable -q --now obs-web.service
 systemctl enable -q --now nginx
 systemctl restart nginx || true
-msg_ok "Created Services"
+
+# Create native LXC container update helper script /usr/local/bin/obs-update
+cat <<'UPDATEEOF' >/usr/local/bin/obs-update
+#!/usr/bin/env bash
+set -e
+echo "=============================================================================="
+echo "  Updating OBS Studio LXC Container, Control Panel & System Packages..."
+echo "=============================================================================="
+
+echo "--> Updating APT package lists and OBS Studio..."
+apt-get update -qq
+apt-get install -y --only-upgrade obs-studio 2>/dev/null || true
+
+echo "--> Updating OBS-Web Remote Control Frontend..."
+if [ ! -d /opt/obs-studio/dashboard/obs-web ]; then
+  rm -rf /opt/obs-studio/dashboard/obs-web
+  git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || (mkdir -p /opt/obs-studio/dashboard/obs-web && curl -fsSL https://codeload.github.com/Niek/obs-web/tar.gz/refs/heads/gh-pages | tar -xz -C /opt/obs-studio/dashboard/obs-web --strip-components=1 2>/dev/null || true)
+else
+  (cd /opt/obs-studio/dashboard/obs-web && git pull 2>/dev/null) || true
+fi
+
+echo "--> Reloading services & status..."
+systemctl daemon-reload 2>/dev/null || true
+systemctl restart obs-dashboard-api.service obs-web.service nginx 2>/dev/null || true
+if [ -x /usr/local/bin/obs-status-update.sh ]; then
+  /usr/local/bin/obs-status-update.sh 2>/dev/null || true
+fi
+
+echo "=============================================================================="
+echo "  ✔️ OBS Studio LXC Container updated successfully!"
+echo "=============================================================================="
+UPDATEEOF
+chmod +x /usr/local/bin/obs-update
+
+msg_ok "Created Services & Update Helper"
 
 # Create credentials.txt management file
 CONTAINER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "LXC_IP")
