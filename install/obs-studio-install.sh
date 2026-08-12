@@ -1890,8 +1890,8 @@ systemctl enable -q --now obs-web.service
 systemctl enable -q --now nginx
 systemctl restart nginx || true
 
-# Create native LXC container update helper script /usr/local/bin/obs-update
-cat <<'UPDATEEOF' >/usr/local/bin/obs-update
+# Create native LXC container update helper script
+cat <<'UPDATEEOF' >/usr/bin/update
 #!/usr/bin/env bash
 set -e
 echo "=============================================================================="
@@ -1921,8 +1921,8 @@ echo "==========================================================================
 echo "  ✔️ OBS Studio LXC Container updated successfully!"
 echo "=============================================================================="
 UPDATEEOF
-chmod +x /usr/local/bin/obs-update
-ln -sf /usr/local/bin/obs-update /usr/local/bin/update
+chmod +x /usr/bin/update
+ln -sf /usr/bin/update /usr/local/bin/obs-update
 
 msg_ok "Created Services & Update Helper"
 

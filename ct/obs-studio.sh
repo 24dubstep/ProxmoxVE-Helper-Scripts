@@ -72,31 +72,42 @@ if lspci -nn 2>/dev/null | grep -qi "NVIDIA" || ls /dev/nvidia* &>/dev/null; the
   NVIDIA_GPU_DETECTED=true
 fi
 
-echo -e "\n${INFO}${YW}GPU Driver Installation (Local .run file)${CL}"
-if [[ "${NVIDIA_GPU_DETECTED}" == "true" ]]; then
-  echo -e "${TAB}${INFO}${GN}NVIDIA GPU hardware detected on host system.${CL}"
-else
-  echo -e "${TAB}${INFO}${YW}No NVIDIA GPU automatically detected on host (or passthrough manual mode).${CL}"
+if [[ -z "${var_gpu_driver_path:-}" ]]; then
+  echo -e "\n${INFO}${YW}GPU Driver Installation (Local .run file)${CL}"
+  if [[ "${NVIDIA_GPU_DETECTED}" == "true" ]]; then
+    echo -e "${TAB}${INFO}${GN}NVIDIA GPU hardware detected on host system.${CL}"
+  else
+    echo -e "${TAB}${INFO}${YW}No NVIDIA GPU automatically detected on host (or passthrough manual mode).${CL}"
+  fi
+  echo -e "${TAB}${INFO}${YW}Provide host path for guest GPU driver to install into container.${CL}"
+  read -r -p "${TAB}Enter GPU driver file path [default: ${DEFAULT_GPU_DRIVER}]: " var_gpu_driver_path
 fi
-echo -e "${TAB}${INFO}${YW}Provide host path for guest GPU driver to install into container.${CL}"
+var_gpu_driver_path="${var_gpu_driver_path:-${DEFAULT_GPU_DRIVER}}"
+var_gpu_driver_path="$(echo "${var_gpu_driver_path}" | xargs)"
+export var_gpu_driver_path="${var_gpu_driver_path:-}"
 
-read -r -p "${TAB}Enter GPU driver file path [default: ${DEFAULT_GPU_DRIVER}]: " GPU_DRIVER_INPUT
-GPU_DRIVER_PATH="${GPU_DRIVER_INPUT:-${DEFAULT_GPU_DRIVER}}"
-GPU_DRIVER_PATH="$(echo "${GPU_DRIVER_PATH}" | xargs)"
+if [[ -z "${var_install_restreamer:-}" ]]; then
+  echo -e "\n${INFO}${YW}Datarhei Restreamer Integration${CL}"
+  echo -e "${TAB}${INFO}${YW}Restreamer can be installed alongside OBS Studio to automatically receive${CL}"
+  echo -e "${TAB}${INFO}${YW}the RTMP stream and restream it to YouTube, Twitch, Facebook, or SRT.${CL}"
+  read -r -p "${TAB}Would you like to install Restreamer alongside OBS Studio? [y/N]: " var_install_restreamer
+fi
+var_install_restreamer="${var_install_restreamer:-no}"
+export var_install_restreamer="${var_install_restreamer:-}"
 
-echo -e "\n${INFO}${YW}Datarhei Restreamer Integration${CL}"
-echo -e "${TAB}${INFO}${YW}Restreamer can be installed alongside OBS Studio to automatically receive${CL}"
-echo -e "${TAB}${INFO}${YW}the RTMP stream and restream it to YouTube, Twitch, Facebook, or SRT.${CL}"
+if [[ "${var_install_restreamer,,}" =~ ^(y|yes)$ ]]; then
+  if [[ -z "${var_restreamer_user:-}" ]]; then
+    echo -e "\n${INFO}${YW}Restreamer Admin Credentials Setup${CL}"
+    read -r -p "${TAB}Enter Admin Username [default: admin]: " var_restreamer_user
+  fi
+  var_restreamer_user="${var_restreamer_user:-admin}"
+  export var_restreamer_user="${var_restreamer_user:-}"
 
-read -r -p "${TAB}Would you like to install Restreamer alongside OBS Studio? [y/N]: " INSTALL_RESTREAMER_INPUT
-
-if [[ "${INSTALL_RESTREAMER_INPUT,,}" =~ ^(y|yes)$ ]]; then
-  echo -e "\n${INFO}${YW}Restreamer Admin Credentials Setup${CL}"
-  read -r -p "${TAB}Enter Admin Username [default: admin]: " RESTREAMER_USER
-  RESTREAMER_USER="${RESTREAMER_USER:-admin}"
-
-  read -r -p "${TAB}Enter Admin Password [default: admin123]: " RESTREAMER_PASS
-  RESTREAMER_PASS="${RESTREAMER_PASS:-admin123}"
+  if [[ -z "${var_restreamer_pass:-}" ]]; then
+    read -r -p "${TAB}Enter Admin Password [default: admin123]: " var_restreamer_pass
+  fi
+  var_restreamer_pass="${var_restreamer_pass:-admin123}"
+  export var_restreamer_pass="${var_restreamer_pass:-}"
 fi
 
 # ==============================================================================
@@ -106,11 +117,11 @@ start
 build_container
 
 # Write Restreamer configuration into CT if requested
-if [[ "${INSTALL_RESTREAMER_INPUT,,}" =~ ^(y|yes)$ ]]; then
+if [[ "${var_install_restreamer,,}" =~ ^(y|yes)$ ]]; then
   pct exec "${CTID}" -- bash -c "cat <<EOF >/etc/restreamer.env
 INSTALL_RESTREAMER=yes
-RS_USERNAME=${RESTREAMER_USER}
-RS_PASSWORD=${RESTREAMER_PASS}
+RS_USERNAME=${var_restreamer_user}
+RS_PASSWORD=${var_restreamer_pass}
 EOF"
   msg_ok "Configured Restreamer credentials for CT ${CTID}"
 fi
@@ -118,17 +129,17 @@ fi
 # ==============================================================================
 # INSTALL LOCAL .RUN GPU DRIVER & CUDA AFTER CARD DETECTION
 # ==============================================================================
-if [[ -n "${GPU_DRIVER_PATH}" ]]; then
-  if [[ ! -f "${GPU_DRIVER_PATH}" ]]; then
-    msg_error "File not found: ${GPU_DRIVER_PATH}"
+if [[ -n "${var_gpu_driver_path}" ]]; then
+  if [[ ! -f "${var_gpu_driver_path}" ]]; then
+    msg_error "File not found: ${var_gpu_driver_path}"
     echo -e "${TAB}${INFO}${YW}Skipping GPU driver installation. You can install it manually later.${CL}"
   else
-    GPU_DRIVER_FILENAME="$(basename "${GPU_DRIVER_PATH}")"
+    GPU_DRIVER_FILENAME="$(basename "${var_gpu_driver_path}")"
     GPU_DRIVER_EXT="${GPU_DRIVER_FILENAME##*.}"
     DRIVER_DEST="/tmp/${GPU_DRIVER_FILENAME}"
 
     msg_info "Pushing GPU driver into container ${CTID}"
-    if pct push "${CTID}" "${GPU_DRIVER_PATH}" "${DRIVER_DEST}" >/dev/null 2>&1; then
+    if pct push "${CTID}" "${var_gpu_driver_path}" "${DRIVER_DEST}" >/dev/null 2>&1; then
       msg_ok "Pushed ${GPU_DRIVER_FILENAME} into container"
 
       # Install CUDA 12 Toolkit FIRST
