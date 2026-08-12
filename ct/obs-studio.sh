@@ -204,7 +204,7 @@ pct exec "${CTID}" -- bash -c "which obs >/dev/null 2>&1 || (apt-get update && a
 pct exec "${CTID}" -- bash -c "
 if [ ! -f /opt/obs-studio/dashboard/obs-web/index.html ]; then
   rm -rf /opt/obs-studio/dashboard/obs-web
-  git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || (mkdir -p /opt/obs-studio/dashboard/obs-web && curl -fsSL https://codeload.github.com/Niek/obs-web/tar.gz/refs/heads/gh-pages | tar -xz -C /opt/obs-studio/dashboard/obs-web --strip-components=1 2>/dev/null || true)
+  git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || (mkdir -p /opt/obs-studio/dashboard/obs-web && curl -fsSL https://github.com/Niek/obs-web/archive/refs/heads/gh-pages.tar.gz | tar -xz -C /opt/obs-studio/dashboard/obs-web --strip-components=1 2>/dev/null || true)
 fi
 " 2>/dev/null || true
 

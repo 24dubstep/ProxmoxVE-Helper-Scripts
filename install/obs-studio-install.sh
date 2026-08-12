@@ -420,13 +420,14 @@ mkdir -p /opt/obs-studio/dashboard /opt/obs-studio/dashboard/api
 rm -rf /opt/obs-studio/dashboard/obs-web
 
 # Fetch Niek's pre-built OBS-Web frontend (gh-pages)
-if command -v git >/dev/null 2>&1; then
-git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || true
-fi
-
-if [[ ! -f /opt/obs-studio/dashboard/obs-web/index.html ]]; then
+if [ ! -d /opt/obs-studio/dashboard/obs-web ]; then
   mkdir -p /opt/obs-studio/dashboard/obs-web
-  curl -fsSL https://codeload.github.com/Niek/obs-web/tar.gz/refs/heads/gh-pages | tar -xz -C /opt/obs-studio/dashboard/obs-web --strip-components=1 2>/dev/null || true
+  if command -v git >/dev/null 2>&1; then
+    git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null
+  fi
+  if [ ! -f /opt/obs-studio/dashboard/obs-web/index.html ]; then
+    curl -fsSL https://github.com/Niek/obs-web/archive/refs/heads/gh-pages.tar.gz | tar -xz -C /opt/obs-studio/dashboard/obs-web --strip-components=1 2>/dev/null || true
+  fi
 fi
 
 # Control API Daemon script (Python 3 standard library backend on port 8889)
@@ -1572,6 +1573,7 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
         const hostIp = window.location.hostname;
         document.getElementById('novnc-link').href = 'http://' + hostIp + ':8081/vnc.html?autoconnect=true&resize=remote';
         document.getElementById('restreamer-link').href = 'http://' + hostIp + ':8080/';
+        document.getElementById('btn-niek').href = '/obs-web/?host=' + hostIp + ':' + (d.obs.websocket_port || 4455);
 
         document.getElementById('last-update').textContent =
           new Date(d.timestamp).toLocaleString();
@@ -1905,7 +1907,7 @@ apt-get install -y --only-upgrade obs-studio 2>/dev/null || true
 echo "--> Updating OBS-Web Remote Control Frontend..."
 if [ ! -d /opt/obs-studio/dashboard/obs-web ]; then
   rm -rf /opt/obs-studio/dashboard/obs-web
-  git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || (mkdir -p /opt/obs-studio/dashboard/obs-web && curl -fsSL https://codeload.github.com/Niek/obs-web/tar.gz/refs/heads/gh-pages | tar -xz -C /opt/obs-studio/dashboard/obs-web --strip-components=1 2>/dev/null || true)
+  git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || (mkdir -p /opt/obs-studio/dashboard/obs-web && curl -fsSL https://github.com/Niek/obs-web/archive/refs/heads/gh-pages.tar.gz | tar -xz -C /opt/obs-studio/dashboard/obs-web --strip-components=1 2>/dev/null || true)
 else
   (cd /opt/obs-studio/dashboard/obs-web && git pull 2>/dev/null) || true
 fi
