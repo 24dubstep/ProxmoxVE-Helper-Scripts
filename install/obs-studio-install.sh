@@ -616,12 +616,20 @@ class DashboardAPIHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"success": True, "config": cfg})
 
         elif parsed.path == '/api/youtube/status':
+            client_id = ""
+            if os.path.exists('/opt/obs-studio/google_client_id.txt'):
+                try:
+                    with open('/opt/obs-studio/google_client_id.txt', 'r') as f:
+                        client_id = f.read().strip()
+                except Exception: pass
+
             if os.path.exists(OAUTH_FILE):
                 try:
                     with open(OAUTH_FILE, 'r') as f:
                         session = json.load(f)
                     self._send_json({
                         "connected": True,
+                        "client_id": client_id or session.get("client_id", ""),
                         "channel_name": session.get("channel_name", "YouTube Channel"),
                         "ingest_url": session.get("ingest_url", "rtmp://a.rtmp.youtube.com/live2"),
                         "updated_at": session.get("updated_at", 0)
@@ -629,7 +637,7 @@ class DashboardAPIHandler(http.server.BaseHTTPRequestHandler):
                     return
                 except Exception:
                     pass
-            self._send_json({"connected": False})
+            self._send_json({"connected": False, "client_id": client_id})
 
         else:
             self._send_json({"error": "Endpoint not found"}, 404)
@@ -641,7 +649,21 @@ class DashboardAPIHandler(http.server.BaseHTTPRequestHandler):
             body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
             try: data = json.loads(body)
             except Exception: data = {}
-            client_id = data.get('client_id', '').strip() or DEFAULT_CLIENT_ID
+            client_id = data.get('client_id', '').strip()
+            if not client_id and os.path.exists('/opt/obs-studio/google_client_id.txt'):
+                try:
+                    with open('/opt/obs-studio/google_client_id.txt', 'r') as f:
+                        client_id = f.read().strip()
+                except Exception: pass
+
+            if not client_id:
+                self._send_json({"success": False, "message": "Please enter your Google OAuth Client ID from Google Cloud Console first."}, 400)
+                return
+
+            try:
+                with open('/opt/obs-studio/google_client_id.txt', 'w') as f:
+                    f.write(client_id)
+            except Exception: pass
             
             try:
                 payload = {
@@ -657,6 +679,9 @@ class DashboardAPIHandler(http.server.BaseHTTPRequestHandler):
                     "expires_in": res.get("expires_in", 1800),
                     "interval": res.get("interval", 5)
                 })
+            except urllib.error.HTTPError as err:
+                err_body = err.read().decode('utf-8')
+                self._send_json({"success": False, "message": f"Google OAuth rejected Client ID ({err.code}): Check that your Client ID is created in Google Cloud Console with Application Type 'TVs and Limited Input devices' or 'Desktop App'."}, 400)
             except Exception as e:
                 self._send_json({"success": False, "message": f"Failed to initiate Google OAuth: {str(e)}"}, 500)
 
@@ -1144,6 +1169,14 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
           Link your YouTube Account directly using Google OAuth Device Authorization Flow. OBS Studio will automatically fetch your live stream ingest URL and stream key without needing manual key entry!
         </p>
 
+        <div class="form-group">
+          <label class="form-label">Google OAuth Client ID (from Google Cloud Console)</label>
+          <input type="text" id="google-client-id" class="form-input" placeholder="e.g. 123456789012-xxxx.apps.googleusercontent.com">
+          <small style="color: var(--text-secondary); font-size: 11px; display: block; margin-top: 4px;">
+            💡 Create a free OAuth Client ID in <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color: var(--accent-blue);">Google Cloud Console</a> (Type: <strong>TVs and Limited Input devices</strong> or <strong>Desktop App</strong>), and enable <strong>YouTube Data API v3</strong>.
+          </small>
+        </div>
+
         <div class="status-row">
           <span class="status-label">Google OAuth Status</span>
           <span id="yt-oauth-badge" class="badge badge-red">Not Linked</span>
@@ -1166,7 +1199,7 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
         <div id="oauth-box" class="oauth-box" style="display: none;">
           <h3 style="font-size: 16px; margin-bottom: 8px; color: var(--accent-blue);">Google Authorization Required</h3>
           <p style="font-size: 13px; color: var(--text-secondary);">
-            1. Open <a id="oauth-verify-link" href="#" target="_blank" style="color: var(--accent-blue); font-weight: 600;">google.com/device</a> in your browser.
+            1. Open <a id="oauth-verify-link" href="https://www.google.com/device" target="_blank" style="color: var(--accent-blue); font-weight: 600;">google.com/device</a> in your browser.
           </p>
           <p style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;">
             2. Enter the 8-character code below and click <strong>Allow</strong>:
@@ -1176,7 +1209,7 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
 
           <div style="display: flex; gap: 8px; justify-content: center; margin-bottom: 8px;">
             <button class="btn" onclick="copyOAuthCode()">📋 Copy Code</button>
-            <a id="oauth-direct-btn" href="#" target="_blank" class="btn btn-success">🔗 Open Google Device Link</a>
+            <a id="oauth-direct-btn" href="https://www.google.com/device" target="_blank" class="btn btn-success">🔗 Open Google Device Link</a>
           </div>
 
           <p id="oauth-poll-status" class="loading" style="font-size: 12px; color: var(--accent-orange); margin-top: 8px;">
@@ -1327,6 +1360,11 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
         const channelName = document.getElementById('yt-channel-name');
         const btnConnect = document.getElementById('btn-yt-connect');
         const btnUnlink = document.getElementById('btn-yt-unlink');
+        const clientIdInput = document.getElementById('google-client-id');
+
+        if (data.client_id && clientIdInput) {
+          clientIdInput.value = data.client_id;
+        }
 
         if (data.connected) {
           badge.className = 'badge badge-green';
@@ -1348,12 +1386,17 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
     }
 
     async function startGoogleOAuth() {
+      const clientId = document.getElementById('google-client-id').value.trim();
+      if (!clientId) {
+        showToast('Please enter your Google OAuth Client ID first.', 'error');
+        return;
+      }
       showToast('Initiating Google OAuth Device Flow...', 'info');
       try {
         const res = await fetch('/api/youtube/oauth-init', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({})
+          body: JSON.stringify({ client_id: clientId })
         });
         const data = await res.json();
         if (data.success) {
@@ -1879,6 +1922,7 @@ echo "  ✔️ OBS Studio LXC Container updated successfully!"
 echo "=============================================================================="
 UPDATEEOF
 chmod +x /usr/local/bin/obs-update
+ln -sf /usr/local/bin/obs-update /usr/local/bin/update
 
 msg_ok "Created Services & Update Helper"
 
