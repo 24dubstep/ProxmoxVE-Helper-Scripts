@@ -157,6 +157,9 @@ fi
 # Restart Restreamer service AFTER GPU driver installation
 pct exec "${CTID}" -- bash -c "systemctl restart restreamer.service 2>/dev/null" || true
 
+# Retrieve container IP address and update description
+description
+
 # Update credentials.txt with container IP and credentials
 pct exec "${CTID}" -- bash -c "cat <<EOF >/opt/restreamer/credentials.txt
 ==============================================================================
@@ -173,7 +176,6 @@ pct exec "${CTID}" -- bash -c "cat <<EOF >/opt/restreamer/credentials.txt
 [Admin Login Credentials]
 - Username:                         ${RESTREAMER_USER}
 - Password:                         ${RESTREAMER_PASS}
-
 [Storage Directories]
 - Restreamer Application Root:      /opt/restreamer
 - Configuration Directory:          /opt/restreamer/config
@@ -182,8 +184,6 @@ pct exec "${CTID}" -- bash -c "cat <<EOF >/opt/restreamer/credentials.txt
 - Credentials File:                 /opt/restreamer/credentials.txt
 ==============================================================================
 EOF" 2>/dev/null || true
-
-description
 
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}\n"

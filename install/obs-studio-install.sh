@@ -410,109 +410,270 @@ msg_ok "Configured VNC & noVNC Web Desktop"
 # ==============================================================================
 msg_info "Setting up OBS Web Dashboard & Control Panel"
 
-mkdir -p /opt/obs-studio/dashboard /opt/obs-studio/dashboard/api /opt/obs-studio/dashboard/obs-web
+mkdir -p /opt/obs-studio/dashboard /opt/obs-studio/dashboard/api
+rm -rf /opt/obs-studio/dashboard/obs-web
 
 # Fetch Niek's pre-built OBS-Web frontend (gh-pages)
 if command -v git >/dev/null 2>&1; then
-  git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || true
+git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || true
 fi
 
 if [[ ! -f /opt/obs-studio/dashboard/obs-web/index.html ]]; then
-  mkdir -p /tmp/obs-web-dl
-  curl -fsSL https://github.com/Niek/obs-web/archive/refs/heads/gh-pages.tar.gz -o /tmp/obs-web.tar.gz 2>/dev/null || true
-  if [[ -f /tmp/obs-web.tar.gz ]]; then
-    tar -xzf /tmp/obs-web.tar.gz -C /tmp/obs-web-dl --strip-components=1 2>/dev/null || true
-    cp -r /tmp/obs-web-dl/* /opt/obs-studio/dashboard/obs-web/ 2>/dev/null || true
-    rm -rf /tmp/obs-web-dl /tmp/obs-web.tar.gz
-  fi
+  mkdir -p /opt/obs-studio/dashboard/obs-web
+  curl -fsSL https://codeload.github.com/Niek/obs-web/tar.gz/refs/heads/gh-pages | tar -xz -C /opt/obs-studio/dashboard/obs-web --strip-components=1 2>/dev/null || true
 fi
 
-# Status update script (called by cron and on-demand)
-cat <<'STATUSEOF' >/opt/obs-studio/scripts/obs-status-update.sh
-#!/usr/bin/env bash
-# Generates /opt/obs-studio/dashboard/api/status.json
+# Control API Daemon script (Python 3 standard library backend on port 8889)
+cat <<'APIEEOF' >/opt/obs-studio/scripts/obs-dashboard-api.py
+#!/usr/bin/env python3
+import http.server
+import json
+import os
+import socket
+import struct
+import subprocess
+import urllib.parse
 
-OBS_PID=$(pgrep -f "bin/obs" 2>/dev/null | head -n1)
-if [[ -z "${OBS_PID}" ]]; then
-  OBS_PID=$(pgrep -x obs 2>/dev/null | head -n1 || echo "")
-fi
-OBS_STATUS="stopped"
-OBS_UPTIME=""
+PORT = 8889
 
-if [[ -n "${OBS_PID}" ]]; then
-  OBS_STATUS="running"
-  OBS_UPTIME=$(ps -p "${OBS_PID}" -o etime= 2>/dev/null | xargs)
-fi
+def send_obs_ws_query(request_type, request_data=None):
+    """Sends a WebSocket 5.x request and returns (success, response_dict)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3.0)
+        s.connect(('127.0.0.1', 4455))
+        
+        ws_key = "dGhlIHNhbXBsZSBub25jZQ=="
+        req = (
+            "GET / HTTP/1.1\r\n"
+            "Host: 127.0.0.1:4455\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {ws_key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        s.sendall(req.encode('utf-8'))
+        resp = s.recv(1024)
+        if b"101 Switching Protocols" not in resp:
+            s.close()
+            return False, {}
 
-# GPU info
-GPU_INFO="None detected"
-GPU_ENCODER="x264"
-if [[ -e /dev/dri/renderD128 ]]; then
-  GPU_INFO="GPU device available (/dev/dri/renderD128)"
-  GPU_ENCODER="vaapi"
-fi
-if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
-  GPU_INFO=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo "NVIDIA GPU")
-  GPU_ENCODER="nvenc"
-fi
+        s.recv(4096)  # Op 0 Hello
 
-# System resources
-CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' 2>/dev/null || echo "0")
-MEM_TOTAL=$(free -m | awk '/Mem:/{print $2}' 2>/dev/null || echo "0")
-MEM_USED=$(free -m | awk '/Mem:/{print $3}' 2>/dev/null || echo "0")
-DISK_USAGE=$(df -h /opt/obs-studio/recordings 2>/dev/null | awk 'NR==2{print $5}' || echo "N/A")
+        def make_frame(data):
+            length = len(data)
+            header = bytearray([0x81])
+            if length < 126:
+                header.append(0x80 | length)
+            elif length < 65536:
+                header.append(0x80 | 126)
+                header.extend(struct.pack('!H', length))
+            mask = b'\x00\x00\x00\x00'
+            header.extend(mask)
+            masked = bytearray(b ^ mask[i % 4] for i, b in enumerate(data))
+            return bytes(header + masked)
 
-# VNC & LightDM status
-VNC_STATUS="stopped"
-if pgrep -f "x11vnc" &>/dev/null; then
-  VNC_STATUS="running"
-fi
+        id_payload = json.dumps({"op": 1, "d": {"rpcVersion": 1}}).encode('utf-8')
+        s.sendall(make_frame(id_payload))
+        s.recv(4096)  # Op 2 Identified
 
-LIGHTDM_STATUS="stopped"
-if pgrep -f "Xvfb|Xorg|lightdm" &>/dev/null; then
-  LIGHTDM_STATUS="running"
-fi
+        req_obj = {
+            "op": 6,
+            "d": {
+                "requestType": request_type,
+                "requestId": "dash-cmd"
+            }
+        }
+        if request_data:
+            req_obj["d"]["requestData"] = request_data
 
-CONTAINER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown")
+        s.sendall(make_frame(req_obj))
+        resp_buf = s.recv(8192)
+        s.close()
 
-cat <<JSONEOF >/opt/obs-studio/dashboard/api/status.json
-{
-  "obs": {
-    "status": "${OBS_STATUS}",
-    "pid": "${OBS_PID}",
-    "uptime": "${OBS_UPTIME}",
-    "websocket_port": 4455
-  },
-  "gpu": {
-    "info": "${GPU_INFO}",
-    "encoder": "${GPU_ENCODER}"
-  },
-  "system": {
-    "cpu_usage": "${CPU_USAGE}",
-    "memory_total_mb": ${MEM_TOTAL},
-    "memory_used_mb": ${MEM_USED},
-    "disk_recordings": "${DISK_USAGE}"
-  },
-  "services": {
-    "lightdm": "${LIGHTDM_STATUS}",
-    "vnc": "${VNC_STATUS}",
-    "novnc_url": "http://${CONTAINER_IP}:8081/vnc.html?autoconnect=true&resize=remote"
-  },
-  "timestamp": "$(date -Iseconds)"
-}
-JSONEOF
-STATUSEOF
-chmod +x /opt/obs-studio/scripts/obs-status-update.sh
-ln -sf /opt/obs-studio/scripts/obs-status-update.sh /usr/local/bin/obs-status-update.sh
+        json_start = resp_buf.find(b'{')
+        if json_start != -1:
+            resp_data = json.loads(resp_buf[json_start:].decode('utf-8', errors='ignore'))
+            if resp_data.get("op") == 7:
+                return True, resp_data.get("d", {}).get("responseData", {})
+        return True, {}
+    except Exception:
+        return False, {}
 
-# Combined Dashboard HTML (System Status + OBS Control Links + WebSocket Controller)
+def get_stream_config():
+    ok, res = send_obs_ws_query("GetStreamServiceSettings")
+    if ok and "streamServiceSettings" in res:
+        st = res["streamServiceSettings"]
+        return {
+            "server": st.get("server", ""),
+            "key": st.get("key", ""),
+            "service_type": res.get("streamServiceType", "rtmp_custom")
+        }
+    service_json_path = '/root/.config/obs-studio/basic/profiles/Headless/service.json'
+    if os.path.exists(service_json_path):
+        try:
+            with open(service_json_path, 'r') as f:
+                d = json.load(f)
+                st = d.get("settings", {})
+                return {
+                    "server": st.get("server", ""),
+                    "key": st.get("key", ""),
+                    "service_type": d.get("type", "rtmp_custom")
+                }
+        except Exception:
+            pass
+    return {"server": "rtmp://127.0.0.1:1935/live", "key": "stream", "service_type": "rtmp_custom"}
+
+def save_stream_config(server_url, stream_key):
+    service_json_path = '/root/.config/obs-studio/basic/profiles/Headless/service.json'
+    data = {
+        "settings": {
+            "bwtest": False,
+            "key": stream_key,
+            "server": server_url,
+            "service": "Custom..."
+        },
+        "type": "rtmp_custom"
+    }
+    try:
+        os.makedirs(os.path.dirname(service_json_path), exist_ok=True)
+        with open(service_json_path, 'w') as f:
+            json.dump(data, f, indent=4)
+    except Exception:
+        pass
+
+    send_obs_ws_query("SetStreamServiceSettings", {
+        "streamServiceType": "rtmp_custom",
+        "streamServiceSettings": {
+            "server": server_url,
+            "key": stream_key
+        }
+    })
+    return True
+
+class DashboardAPIHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args): pass
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def _send_json(self, data, status=200):
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == '/api/logs':
+            query = urllib.parse.parse_qs(parsed.query)
+            log_type = query.get('type', ['obs'])[0]
+            log_file = '/var/log/obs-studio.log'
+            if log_type == 'vnc': log_file = '/var/log/x11vnc.log'
+            elif log_type == 'nginx': log_file = '/var/log/nginx/error.log'
+            elif log_type == 'api': log_file = '/var/log/obs-dashboard-api.log'
+            lines = []
+            if os.path.exists(log_file):
+                try:
+                    with open(log_file, 'r', errors='ignore') as f: lines = f.readlines()[-80:]
+                except Exception as e: lines = [f"Error reading log: {str(e)}"]
+            else: lines = [f"Log file not found: {log_file}"]
+            self._send_json({"success": True, "type": log_type, "logs": "".join(lines)})
+
+        elif parsed.path == '/api/stream-config':
+            cfg = get_stream_config()
+            self._send_json({"success": True, "config": cfg})
+        else:
+            self._send_json({"error": "Endpoint not found"}, 404)
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == '/api/stream-config':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+            try: data = json.loads(body)
+            except Exception: data = {}
+            server_url = data.get('server', '').strip()
+            stream_key = data.get('key', '').strip()
+            if not server_url:
+                self._send_json({"success": False, "message": "Server URL cannot be empty."}, 400)
+                return
+            save_stream_config(server_url, stream_key)
+            self._send_json({"success": True, "message": "Stream server configuration updated & applied to OBS!"})
+
+        elif parsed.path == '/api/action':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+            try: data = json.loads(body)
+            except Exception: data = {}
+            action = data.get('action', '')
+            msg = ""
+            success = True
+
+            if action == 'restart-obs':
+                subprocess.run("pkill -9 -f 'bin/obs' || pkill -9 obs || true", shell=True)
+                msg = "OBS Studio process killed. Auto-restart watchdog is launching a fresh instance."
+            elif action == 'start-stream':
+                ok, _ = send_obs_ws_query("StartStream")
+                msg = "Stream start request sent." if ok else "Failed to send StartStream request."
+                success = ok
+            elif action == 'stop-stream':
+                ok, _ = send_obs_ws_query("StopStream")
+                msg = "Stream stop request sent." if ok else "Failed to send StopStream request."
+                success = ok
+            elif action == 'start-record':
+                ok, _ = send_obs_ws_query("StartRecord")
+                msg = "Record start request sent." if ok else "Failed to send StartRecord request."
+                success = ok
+            elif action == 'stop-record':
+                ok, _ = send_obs_query("StopRecord")
+                msg = "Record stop request sent." if ok else "Failed to send StopRecord request."
+                success = ok
+            elif action == 'restart-vnc':
+                subprocess.run("pkill -9 x11vnc || true", shell=True)
+                msg = "X11VNC server killed. Auto-restart watchdog is restarting VNC."
+            elif action == 'restart-all':
+                subprocess.run("systemctl restart obs-web.service nginx 2>/dev/null || true", shell=True)
+                if os.path.exists('/etc/systemd/system/restreamer.service'):
+                    subprocess.run("systemctl restart restreamer.service 2>/dev/null || true", shell=True)
+                msg = "All background services restarted."
+            elif action == 'clean-recordings':
+                rec_dir = '/opt/obs-studio/recordings'
+                if os.path.exists(rec_dir):
+                    subprocess.run(f"rm -rf {rec_dir}/*", shell=True)
+                    msg = "Recordings directory cleared successfully."
+                else: msg = "Recordings directory not found."
+            elif action == 'reload-nginx':
+                subprocess.run("systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null", shell=True)
+                msg = "Nginx web server reloaded."
+            else:
+                success = False
+                msg = f"Unknown action: {action}"
+
+            subprocess.run("/usr/local/bin/obs-status-update.sh 2>/dev/null || true", shell=True)
+            self._send_json({"success": success, "message": msg, "action": action})
+        else:
+            self._send_json({"error": "Endpoint not found"}, 404)
+
+if __name__ == '__main__':
+    server = http.server.HTTPServer(('127.0.0.1', PORT), DashboardAPIHandler)
+    server.serve_forever()
+APIEEOF
+chmod +x /opt/obs-studio/scripts/obs-dashboard-api.py
+
+# Combined Dashboard HTML (Unified OBS Control Panel with Integrated OBS-Web & Stream Setup)
 cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OBS Studio — Headless Dashboard</title>
+  <title>OBS Studio — Headless Control Panel</title>
   <style>
     :root {
       --bg-primary: #0d1117;
@@ -534,31 +695,60 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
       background: var(--bg-primary);
       color: var(--text-primary);
       min-height: 100vh;
-      padding: 24px;
+      padding: 20px;
     }
     .header {
       text-align: center;
-      margin-bottom: 32px;
-      padding: 24px;
+      margin-bottom: 20px;
+      padding: 20px;
       background: var(--bg-card);
       border: 1px solid var(--border);
       border-radius: 12px;
     }
     .header h1 {
-      font-size: 28px;
+      font-size: 26px;
       font-weight: 600;
       background: var(--gradient-primary);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
-    .header p { color: var(--text-secondary); font-size: 14px; }
+    .header p { color: var(--text-secondary); font-size: 13px; }
+    
+    .nav-bar {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+    .nav-tab {
+      padding: 10px 20px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .nav-tab:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+    .nav-tab.active {
+      background: rgba(88, 166, 255, 0.15);
+      border-color: var(--accent-blue);
+      color: var(--accent-blue);
+    }
+    
+    .tab-view { display: none; }
+    .tab-view.active { display: block; }
+
     .grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
       gap: 16px;
-      max-width: 1200px;
+      max-width: 1280px;
       margin: 0 auto;
     }
     .card {
@@ -566,12 +756,8 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 20px;
-      transition: background 0.2s, border-color 0.2s;
     }
-    .card:hover {
-      background: var(--bg-card-hover);
-      border-color: var(--accent-blue);
-    }
+    .card-full { grid-column: 1 / -1; }
     .card-title {
       font-size: 13px;
       font-weight: 600;
@@ -583,7 +769,6 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
       align-items: center;
       gap: 8px;
     }
-    .card-title .icon { font-size: 16px; }
     .status-row {
       display: flex;
       justify-content: space-between;
@@ -603,158 +788,232 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
       font-size: 12px;
       font-weight: 600;
     }
-    .badge-green {
-      background: rgba(63, 185, 80, 0.15);
-      color: var(--accent-green);
-      border: 1px solid rgba(63, 185, 80, 0.3);
-    }
-    .badge-red {
-      background: rgba(248, 81, 73, 0.15);
-      color: var(--accent-red);
-      border: 1px solid rgba(248, 81, 73, 0.3);
-    }
-    .badge-blue {
-      background: rgba(88, 166, 255, 0.15);
-      color: var(--accent-blue);
-      border: 1px solid rgba(88, 166, 255, 0.3);
-    }
-    .badge::before {
-      content: '';
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      display: inline-block;
-    }
+    .badge-green { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); border: 1px solid rgba(63, 185, 80, 0.3); }
+    .badge-red { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); border: 1px solid rgba(248, 81, 73, 0.3); }
+    .badge-blue { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); border: 1px solid rgba(88, 166, 255, 0.3); }
+    .badge::before { content: ''; width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
     .badge-green::before { background: var(--accent-green); }
     .badge-red::before { background: var(--accent-red); }
     .badge-blue::before { background: var(--accent-blue); }
-    .progress-bar {
-      width: 100%;
-      height: 6px;
-      background: var(--border);
-      border-radius: 3px;
-      margin-top: 4px;
+    .progress-bar { width: 100%; height: 6px; background: var(--border); border-radius: 3px; margin-top: 4px; }
+    .progress-fill { height: 100%; border-radius: 3px; background: var(--gradient-primary); transition: width 0.5s ease; }
+    .btn-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
     }
-    .progress-fill {
-      height: 100%;
-      border-radius: 3px;
-      background: var(--gradient-primary);
-      transition: width 0.5s ease;
-    }
-    .link-btn {
+    .btn {
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 8px;
-      padding: 10px 20px;
+      padding: 10px 14px;
       border-radius: 8px;
-      text-decoration: none;
-      font-size: 14px;
-      font-weight: 500;
-      transition: all 0.2s;
       border: 1px solid var(--border);
-      color: var(--text-primary);
       background: var(--bg-primary);
+      color: var(--text-primary);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-decoration: none;
     }
-    .link-btn:hover {
-      border-color: var(--accent-blue);
-      background: rgba(88, 166, 255, 0.1);
+    .btn:hover { border-color: var(--accent-blue); background: rgba(88, 166, 255, 0.12); transform: translateY(-1px); }
+    .btn:active { transform: translateY(0); }
+    .btn-danger { border-color: rgba(248, 81, 73, 0.5); }
+    .btn-danger:hover { background: rgba(248, 81, 73, 0.2); border-color: var(--accent-red); }
+    .btn-warning { border-color: rgba(210, 153, 34, 0.5); }
+    .btn-warning:hover { background: rgba(210, 153, 34, 0.2); border-color: var(--accent-orange); }
+    .btn-success { border-color: rgba(63, 185, 80, 0.5); }
+    .btn-success:hover { background: rgba(63, 185, 80, 0.2); border-color: var(--accent-green); }
+    .btn-purple { border-color: rgba(188, 140, 255, 0.5); }
+    .btn-purple:hover { background: rgba(188, 140, 255, 0.2); border-color: var(--accent-purple); }
+
+    /* Form Inputs */
+    .form-group { margin-bottom: 16px; }
+    .form-label { display: block; font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+    .form-input, .form-select {
+      width: 100%;
+      padding: 10px 14px;
+      background: #090d13;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-primary);
+      font-size: 14px;
+      font-family: inherit;
     }
-    .link-btn.primary {
-      background: var(--accent-blue);
-      color: #fff;
-      border-color: var(--accent-blue);
-    }
-    .link-btn.primary:hover { opacity: 0.9; }
-    .links { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
-    .refresh-info {
-      text-align: center;
-      margin-top: 24px;
-      color: var(--text-secondary);
+    .form-input:focus, .form-select:focus { outline: none; border-color: var(--accent-blue); }
+
+    .tabs { display: flex; gap: 8px; margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+    .tab-btn { padding: 6px 12px; font-size: 13px; border-radius: 6px; background: transparent; border: 1px solid transparent; color: var(--text-secondary); cursor: pointer; }
+    .tab-btn.active { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); border-color: var(--accent-blue); font-weight: 600; }
+    .log-container {
+      background: #090d13;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
       font-size: 12px;
+      line-height: 1.5;
+      color: #7ee787;
+      height: 320px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
     }
+
+    #toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; display: flex; flex-direction: column; gap: 10px; }
+    .toast { padding: 12px 18px; border-radius: 8px; background: var(--bg-card); border: 1px solid var(--border); color: var(--text-primary); font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); animation: slideIn 0.3s ease; }
+    .toast-success { border-color: var(--accent-green); color: var(--accent-green); }
+    .toast-error { border-color: var(--accent-red); color: var(--accent-red); }
+    .toast-info { border-color: var(--accent-blue); color: var(--accent-blue); }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    
+    .refresh-info { text-align: center; margin-top: 24px; color: var(--text-secondary); font-size: 12px; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     .loading { animation: pulse 1.5s infinite; }
   </style>
 </head>
 <body>
+  <div id="toast-container"></div>
+
   <div class="header">
     <h1>🎬 OBS Studio — Headless Control Panel</h1>
-    <p>Proxmox LXC Container Management Dashboard</p>
+    <p>Unified Proxmox LXC Container Management & Live Remote Control</p>
   </div>
 
-  <div class="grid">
-    <!-- OBS Status -->
-    <div class="card">
-      <div class="card-title"><span class="icon">📡</span> OBS Studio</div>
-      <div class="status-row">
-        <span class="status-label">Status</span>
-        <span id="obs-status" class="badge badge-red loading">Loading...</span>
-      </div>
-      <div class="status-row">
-        <span class="status-label">PID</span>
-        <span id="obs-pid" class="status-value">—</span>
-      </div>
-      <div class="status-row">
-        <span class="status-label">Uptime</span>
-        <span id="obs-uptime" class="status-value">—</span>
-      </div>
-      <div class="status-row">
-        <span class="status-label">WebSocket Port</span>
-        <span id="obs-ws-port" class="status-value">4455</span>
-      </div>
-    </div>
+  <div class="nav-bar">
+    <button id="nav-dash" class="nav-tab active" onclick="switchNav('dash')">📊 Dashboard & Controls</button>
+    <button id="nav-obsweb" class="nav-tab" onclick="switchNav('obsweb')">🎛️ OBS Web Remote Control</button>
+    <button id="nav-stream" class="nav-tab" onclick="switchNav('stream')">⚙️ Stream Server Setup</button>
+    <button id="nav-logs" class="nav-tab" onclick="switchNav('logs')">📋 System Logs</button>
+  </div>
 
-    <!-- GPU & Encoder -->
-    <div class="card">
-      <div class="card-title"><span class="icon">🎮</span> GPU & Encoder</div>
-      <div class="status-row">
-        <span class="status-label">GPU</span>
-        <span id="gpu-info" class="status-value">—</span>
+  <!-- VIEW 1: DASHBOARD -->
+  <div id="view-dash" class="tab-view active">
+    <div class="grid">
+      <div class="card">
+        <div class="card-title"><span class="icon">📡</span> OBS Studio</div>
+        <div class="status-row"><span class="status-label">Status</span><span id="obs-status" class="badge badge-red loading">Loading...</span></div>
+        <div class="status-row"><span class="status-label">PID</span><span id="obs-pid" class="status-value">—</span></div>
+        <div class="status-row"><span class="status-label">Uptime</span><span id="obs-uptime" class="status-value">—</span></div>
+        <div class="status-row"><span class="status-label">WebSocket Port</span><span id="obs-ws-port" class="status-value">4455</span></div>
       </div>
-      <div class="status-row">
-        <span class="status-label">Encoder</span>
-        <span id="gpu-encoder" class="badge badge-blue">—</span>
-      </div>
-    </div>
 
-    <!-- System Resources -->
-    <div class="card">
-      <div class="card-title"><span class="icon">⚙️</span> System Resources</div>
-      <div class="status-row">
-        <span class="status-label">CPU Usage</span>
-        <span id="cpu-usage" class="status-value">—</span>
+      <div class="card">
+        <div class="card-title"><span class="icon">🎮</span> GPU & Encoder</div>
+        <div class="status-row"><span class="status-label">GPU</span><span id="gpu-info" class="status-value">—</span></div>
+        <div class="status-row"><span class="status-label">Encoder</span><span id="gpu-encoder" class="badge badge-blue">—</span></div>
       </div>
-      <div class="status-row" style="flex-direction: column; align-items: stretch;">
-        <div style="display: flex; justify-content: space-between;">
-          <span class="status-label">Memory</span>
-          <span id="mem-info" class="status-value">—</span>
+
+      <div class="card">
+        <div class="card-title"><span class="icon">⚙️</span> System Resources</div>
+        <div class="status-row"><span class="status-label">CPU Usage</span><span id="cpu-usage" class="status-value">—</span></div>
+        <div class="status-row" style="flex-direction: column; align-items: stretch;">
+          <div style="display: flex; justify-content: space-between;"><span class="status-label">Memory</span><span id="mem-info" class="status-value">—</span></div>
+          <div class="progress-bar"><div id="mem-bar" class="progress-fill" style="width: 0%;"></div></div>
         </div>
-        <div class="progress-bar">
-          <div id="mem-bar" class="progress-fill" style="width: 0%;"></div>
+        <div class="status-row"><span class="status-label">Recordings Disk</span><span id="disk-usage" class="status-value">—</span></div>
+      </div>
+
+      <div class="card card-full">
+        <div class="card-title"><span class="icon">⚡</span> Quick Control Actions & Management</div>
+        <div class="btn-grid">
+          <button class="btn btn-warning" onclick="triggerAction('restart-obs', 'Are you sure you want to restart OBS Studio?')">🎬 Restart OBS Studio</button>
+          <button class="btn btn-success" onclick="triggerAction('start-stream')">🔴 Start Stream</button>
+          <button class="btn btn-danger" onclick="triggerAction('stop-stream')">⏹️ Stop Stream</button>
+          <button class="btn btn-purple" onclick="triggerAction('start-record')">⏺️ Start Record</button>
+          <button class="btn" onclick="triggerAction('stop-record')">⏹️ Stop Record</button>
+          <button class="btn btn-warning" onclick="triggerAction('restart-vnc', 'Restart VNC server?')">🖥️ Restart VNC</button>
+          <button class="btn btn-danger" onclick="triggerAction('restart-all', 'Restart all background services?')">🚀 Restart All Services</button>
+          <button class="btn btn-warning" onclick="triggerAction('clean-recordings', 'Delete all recordings?')">🧹 Clean Recordings</button>
+          <button class="btn" onclick="triggerAction('reload-nginx')">⚡ Reload Nginx</button>
         </div>
       </div>
-      <div class="status-row">
-        <span class="status-label">Recordings Disk</span>
-        <span id="disk-usage" class="status-value">—</span>
+
+      <div class="card card-full">
+        <div class="card-title"><span class="icon">🔗</span> Integrated Interfaces & Web Tools</div>
+        <div class="btn-grid">
+          <button onclick="switchNav('obsweb')" class="btn btn-purple">🎛️ Open Integrated OBS Web Control</button>
+          <a id="restreamer-link" href="#" target="_blank" class="btn btn-success">📡 Open Restreamer Interface</a>
+          <a id="novnc-link" href="#" target="_blank" class="btn">🖥️ Open noVNC Web Desktop</a>
+          <a href="/api/status.json" target="_blank" class="btn">📊 System Status JSON API</a>
+        </div>
       </div>
     </div>
+  </div>
 
-    <!-- Quick Actions & Links -->
-    <div class="card">
-      <div class="card-title"><span class="icon">🔗</span> Remote Control & Interfaces</div>
-      <div class="status-row">
-        <span class="status-label">LightDM / X11</span>
-        <span id="lightdm-status" class="badge badge-red loading">Loading...</span>
+  <!-- VIEW 2: EMBEDDED OBS-WEB REMOTE CONTROL -->
+  <div id="view-obsweb" class="tab-view">
+    <div class="card card-full" style="padding: 12px;">
+      <div class="card-title" style="justify-content: space-between; margin-bottom: 12px;">
+        <span>🎛️ OBS Web Remote Control (Integrated Niek Frontend)</span>
+        <button class="btn" onclick="reloadObsWebIframe()" style="padding: 4px 10px; font-size: 12px;">🔄 Refresh Controller</button>
       </div>
-      <div class="status-row">
-        <span class="status-label">VNC Server</span>
-        <span id="vnc-status" class="badge badge-red loading">Loading...</span>
+      <iframe id="obsweb-iframe" src="about:blank" style="width: 100%; height: 720px; border: 1px solid var(--border); border-radius: 8px; background: #000;"></iframe>
+    </div>
+  </div>
+
+  <!-- VIEW 3: STREAM SERVER SETUP -->
+  <div id="view-stream" class="tab-view">
+    <div class="grid" style="max-width: 800px;">
+      <div class="card card-full">
+        <div class="card-title"><span class="icon">⚙️</span> Streaming Server & Ingest Configuration</div>
+        <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">
+          Configure where OBS Studio sends the video stream (YouTube, Twitch, Restreamer, or Custom RTMP/SRT Server).
+        </p>
+
+        <div class="form-group">
+          <label class="form-label">Streaming Service Preset</label>
+          <select id="stream-preset" class="form-select" onchange="applyPreset()">
+            <option value="custom">⚙️ Custom RTMP / SRT Ingest Server</option>
+            <option value="youtube">🔴 YouTube Live (rtmp://a.rtmp.youtube.com/live2)</option>
+            <option value="twitch">🟣 Twitch Live (rtmp://live.twitch.tv/app/)</option>
+            <option value="facebook">🔵 Facebook Live (rtmps://live-api-s.facebook.com:443/rtmp/)</option>
+            <option value="restreamer">📡 Local Restreamer Engine (rtmp://127.0.0.1:1935/live)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Server Ingest URL (RTMP / RTMPS / SRT)</label>
+          <input type="text" id="stream-server" class="form-input" placeholder="rtmp://a.rtmp.youtube.com/live2">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Stream Key / Passcode</label>
+          <div style="display: flex; gap: 8px;">
+            <input type="password" id="stream-key" class="form-input" placeholder="Enter stream key...">
+            <button class="btn" onclick="toggleKeyVisibility()" style="white-space: nowrap;">👁️ Show/Hide</button>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 12px; margin-top: 24px;">
+          <button class="btn btn-success" onclick="saveStreamConfig()" style="flex: 1; padding: 12px;">💾 Save & Apply Stream Config</button>
+          <button class="btn" onclick="loadStreamConfig()" style="padding: 12px;">🔄 Reload Current Settings</button>
+        </div>
       </div>
-      <div class="links">
-        <a id="obsweb-link" href="/obs-web/" target="_blank" class="link-btn primary">🎛️ Open OBS Web Remote Control</a>
-        <a id="restreamer-link" href="#" target="_blank" class="link-btn primary">📡 Open Restreamer Interface</a>
-        <a id="novnc-link" href="#" target="_blank" class="link-btn">🖥️ Open noVNC Desktop</a>
-        <a href="/api/status.json" target="_blank" class="link-btn">📊 System Status API</a>
+    </div>
+  </div>
+
+  <!-- VIEW 4: SYSTEM LOGS -->
+  <div id="view-logs" class="tab-view">
+    <div class="grid" style="max-width: 1280px;">
+      <div class="card card-full">
+        <div class="card-title" style="justify-content: space-between;">
+          <span><span class="icon">📋</span> Live System Logs Viewer</span>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn" onclick="loadLog(activeLogType)" style="padding: 4px 10px; font-size: 12px;">🔄 Refresh Log</button>
+            <button class="btn" onclick="copyLog()" style="padding: 4px 10px; font-size: 12px;">📋 Copy Log</button>
+          </div>
+        </div>
+        <div class="tabs">
+          <button id="tab-obs" class="tab-btn active" onclick="loadLog('obs')">🎬 OBS Studio Log</button>
+          <button id="tab-vnc" class="tab-btn" onclick="loadLog('vnc')">🖥️ VNC Log</button>
+          <button id="tab-nginx" class="tab-btn" onclick="loadLog('nginx')">🌐 Nginx Log</button>
+          <button id="tab-api" class="tab-btn" onclick="loadLog('api')">⚡ Control API Log</button>
+        </div>
+        <div id="log-console" class="log-container">Loading logs...</div>
       </div>
     </div>
   </div>
@@ -764,6 +1023,149 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
   </div>
 
   <script>
+    let activeLogType = 'obs';
+
+    function showToast(msg, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = `toast toast-${type}`;
+      toast.textContent = msg;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transition = 'opacity 0.3s';
+        setTimeout(() => toast.remove(), 300);
+      }, 4000);
+    }
+
+    function switchNav(tab) {
+      document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-view').forEach(v => v.classList.remove('active'));
+      
+      const navBtn = document.getElementById('nav-' + tab);
+      const viewEl = document.getElementById('view-' + tab);
+      if (navBtn) navBtn.classList.add('active');
+      if (viewEl) viewEl.classList.add('active');
+
+      if (tab === 'obsweb') {
+        const iframe = document.getElementById('obsweb-iframe');
+        if (iframe.src === 'about:blank' || !iframe.src) {
+          reloadObsWebIframe();
+        }
+      } else if (tab === 'stream') {
+        loadStreamConfig();
+      } else if (tab === 'logs') {
+        loadLog(activeLogType);
+      }
+    }
+
+    function reloadObsWebIframe() {
+      const hostIp = window.location.hostname;
+      const iframe = document.getElementById('obsweb-iframe');
+      iframe.src = '/obs-web/?host=' + hostIp + ':4455';
+    }
+
+    async function triggerAction(actionName, confirmMsg) {
+      if (confirmMsg && !confirm(confirmMsg)) return;
+      showToast(`Executing action: ${actionName}...`, 'info');
+      try {
+        const res = await fetch('/api/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: actionName })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast(data.message || 'Action executed successfully!', 'success');
+          setTimeout(fetchStatus, 1500);
+        } else {
+          showToast(`Action failed: ${data.message || 'Unknown error'}`, 'error');
+        }
+      } catch (err) {
+        showToast(`Network error: ${err.message}`, 'error');
+      }
+    }
+
+    function applyPreset() {
+      const preset = document.getElementById('stream-preset').value;
+      const serverInput = document.getElementById('stream-server');
+      if (preset === 'youtube') serverInput.value = 'rtmp://a.rtmp.youtube.com/live2';
+      else if (preset === 'twitch') serverInput.value = 'rtmp://live.twitch.tv/app/';
+      else if (preset === 'facebook') serverInput.value = 'rtmps://live-api-s.facebook.com:443/rtmp/';
+      else if (preset === 'restreamer') serverInput.value = 'rtmp://127.0.0.1:1935/live';
+    }
+
+    function toggleKeyVisibility() {
+      const keyInput = document.getElementById('stream-key');
+      keyInput.type = keyInput.type === 'password' ? 'text' : 'password';
+    }
+
+    async function loadStreamConfig() {
+      try {
+        const res = await fetch('/api/stream-config?_=' + Date.now());
+        const data = await res.json();
+        if (data.success && data.config) {
+          document.getElementById('stream-server').value = data.config.server || '';
+          document.getElementById('stream-key').value = data.config.key || '';
+          showToast('Stream settings loaded.', 'info');
+        }
+      } catch (err) {
+        showToast('Failed to load stream settings: ' + err.message, 'error');
+      }
+    }
+
+    async function saveStreamConfig() {
+      const server = document.getElementById('stream-server').value.trim();
+      const key = document.getElementById('stream-key').value.trim();
+      if (!server) {
+        showToast('Please enter a valid Stream Server URL.', 'error');
+        return;
+      }
+      showToast('Saving stream configuration...', 'info');
+      try {
+        const res = await fetch('/api/stream-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ server, key })
+        });
+        const data = await res.json();
+        if (data.success) {
+          showToast(data.message || 'Stream config saved & applied!', 'success');
+        } else {
+          showToast('Failed to save config: ' + data.message, 'error');
+        }
+      } catch (err) {
+        showToast('Network error saving config: ' + err.message, 'error');
+      }
+    }
+
+    async function loadLog(type) {
+      activeLogType = type;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      const activeTab = document.getElementById('tab-' + type);
+      if (activeTab) activeTab.classList.add('active');
+      
+      const consoleEl = document.getElementById('log-console');
+      consoleEl.textContent = `Loading ${type} logs...`;
+      try {
+        const res = await fetch(`/api/logs?type=${type}&_=${Date.now()}`);
+        const data = await res.json();
+        consoleEl.textContent = data.logs || 'No log content available.';
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+      } catch (err) {
+        consoleEl.textContent = `Failed to fetch logs: ${err.message}`;
+      }
+    }
+
+    function copyLog() {
+      const consoleEl = document.getElementById('log-console');
+      navigator.clipboard.writeText(consoleEl.textContent).then(() => {
+        showToast('Logs copied to clipboard!', 'success');
+      }).catch(() => {
+        showToast('Failed to copy logs', 'error');
+      });
+    }
+
     async function fetchStatus() {
       try {
         const res = await fetch('/api/status.json?_=' + Date.now());
@@ -791,21 +1193,10 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
         document.getElementById('mem-bar').style.width = memPct + '%';
         document.getElementById('disk-usage').textContent = d.system.disk_recordings;
 
-        // Services
-        const ldmEl = document.getElementById('lightdm-status');
-        ldmEl.className = d.services.lightdm === 'running' ? 'badge badge-green' : 'badge badge-red';
-        ldmEl.textContent = d.services.lightdm === 'running' ? '● Running' : '● Stopped';
-
-        const vncEl = document.getElementById('vnc-status');
-        vncEl.className = d.services.vnc === 'running' ? 'badge badge-green' : 'badge badge-red';
-        vncEl.textContent = d.services.vnc === 'running' ? '● Running' : '● Stopped';
-        
         const hostIp = window.location.hostname;
         document.getElementById('novnc-link').href = 'http://' + hostIp + ':8081/vnc.html?autoconnect=true&resize=remote';
         document.getElementById('restreamer-link').href = 'http://' + hostIp + ':8080/';
-        document.getElementById('obsweb-link').href = '/obs-web/?host=' + hostIp + ':4455';
 
-        // Timestamp
         document.getElementById('last-update').textContent =
           new Date(d.timestamp).toLocaleString();
       } catch (e) {
@@ -833,7 +1224,12 @@ server {
         try_files \$uri \$uri/ =404;
     }
 
-    location /obs-web {
+    location = /obs-web {
+        return 301 /obs-web/;
+    }
+
+    location /obs-web/ {
+        alias /opt/obs-studio/dashboard/obs-web/;
         try_files \$uri \$uri/ /obs-web/index.html;
     }
 
@@ -841,6 +1237,32 @@ server {
         root /opt/obs-studio/dashboard/obs-web;
         expires 30d;
         add_header Cache-Control "public, no-transform";
+    }
+
+    location /favicon.png {
+        alias /opt/obs-studio/dashboard/obs-web/favicon.png;
+    }
+
+    location /manifest.json {
+        alias /opt/obs-studio/dashboard/obs-web/manifest.json;
+    }
+
+    location /api/stream-config {
+        proxy_pass http://127.0.0.1:8889/api/stream-config;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+    }
+
+    location /api/action {
+        proxy_pass http://127.0.0.1:8889/api/action;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+    }
+
+    location /api/logs {
+        proxy_pass http://127.0.0.1:8889/api/logs;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
     }
 
     location /api/ {
@@ -981,6 +1403,25 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+# Dashboard API Daemon systemd service
+cat <<EOF >/etc/systemd/system/obs-dashboard-api.service
+[Unit]
+Description=OBS Studio Dashboard Control API Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/obs-studio/scripts/obs-dashboard-api.py
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/obs-dashboard-api.log
+StandardError=append:/var/log/obs-dashboard-api.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable -q --now obs-dashboard-api.service
 systemctl enable -q --now obs-web.service
 systemctl enable -q --now nginx
 systemctl restart nginx || true

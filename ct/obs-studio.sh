@@ -189,7 +189,15 @@ fi
 
 # Re-verify obs-studio package and obs-web files presence
 pct exec "${CTID}" -- bash -c "which obs >/dev/null 2>&1 || (apt-get update && apt-get install -y obs-studio)" 2>/dev/null || true
-pct exec "${CTID}" -- bash -c "if [ ! -f /opt/obs-studio/dashboard/obs-web/index.html ]; then git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || true; fi" 2>/dev/null || true
+pct exec "${CTID}" -- bash -c "
+if [ ! -f /opt/obs-studio/dashboard/obs-web/index.html ]; then
+  rm -rf /opt/obs-studio/dashboard/obs-web
+  git clone --depth 1 -b gh-pages https://github.com/Niek/obs-web.git /opt/obs-studio/dashboard/obs-web 2>/dev/null || (mkdir -p /opt/obs-studio/dashboard/obs-web && curl -fsSL https://codeload.github.com/Niek/obs-web/tar.gz/refs/heads/gh-pages | tar -xz -C /opt/obs-studio/dashboard/obs-web --strip-components=1 2>/dev/null || true)
+fi
+" 2>/dev/null || true
+
+# Retrieve container IP address and update description
+description
 
 # Update credentials.txt with container IP and credentials
 RS_USER_VAL="N/A"
@@ -229,9 +237,7 @@ pct exec "${CTID}" -- bash -c "cat <<EOF >/opt/obs-studio/credentials.txt
 EOF" 2>/dev/null || true
 
 # Restart services and update dashboard status AFTER driver installation
-pct exec "${CTID}" -- bash -c "systemctl restart nginx obs-web.service && /usr/local/bin/obs-status-update.sh" 2>/dev/null || true
-
-description
+pct exec "${CTID}" -- bash -c "systemctl restart nginx obs-web.service obs-dashboard-api.service 2>/dev/null && /usr/local/bin/obs-status-update.sh" 2>/dev/null || true
 
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}\n"
