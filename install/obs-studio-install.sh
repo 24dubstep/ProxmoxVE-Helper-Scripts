@@ -432,9 +432,29 @@ import os
 import socket
 import struct
 import subprocess
+import time
+import urllib.error
 import urllib.parse
+import urllib.request
 
 PORT = 8889
+DEFAULT_CLIENT_ID = "871542478310-4n88v8h1v5n1b4.apps.googleusercontent.com"
+GOOGLE_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+YOUTUBE_STREAMS_URL = "https://www.googleapis.com/youtube/v3/liveStreams?part=cdn,status&mine=true"
+YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true"
+OAUTH_FILE = "/opt/obs-studio/google_oauth.json"
+
+def http_post_form(url, data_dict):
+    encoded_data = urllib.parse.urlencode(data_dict).encode('utf-8')
+    req = urllib.request.Request(url, data=encoded_data, headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
+def http_get_json(url, access_token):
+    req = urllib.request.Request(url, headers={'Authorization': f'Bearer {access_token}'})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode('utf-8'))
 
 def send_obs_ws_query(request_type, request_data=None):
     """Sends a WebSocket 5.x request and returns (success, response_dict)."""
@@ -588,12 +608,145 @@ class DashboardAPIHandler(http.server.BaseHTTPRequestHandler):
         elif parsed.path == '/api/stream-config':
             cfg = get_stream_config()
             self._send_json({"success": True, "config": cfg})
+
+        elif parsed.path == '/api/youtube/status':
+            if os.path.exists(OAUTH_FILE):
+                try:
+                    with open(OAUTH_FILE, 'r') as f:
+                        session = json.load(f)
+                    self._send_json({
+                        "connected": True,
+                        "channel_name": session.get("channel_name", "YouTube Channel"),
+                        "ingest_url": session.get("ingest_url", "rtmp://a.rtmp.youtube.com/live2"),
+                        "updated_at": session.get("updated_at", 0)
+                    })
+                    return
+                except Exception:
+                    pass
+            self._send_json({"connected": False})
+
         else:
             self._send_json({"error": "Endpoint not found"}, 404)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == '/api/stream-config':
+        if parsed.path == '/api/youtube/oauth-init':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+            try: data = json.loads(body)
+            except Exception: data = {}
+            client_id = data.get('client_id', '').strip() or DEFAULT_CLIENT_ID
+            
+            try:
+                payload = {
+                    "client_id": client_id,
+                    "scope": "https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl"
+                }
+                res = http_post_form(GOOGLE_DEVICE_CODE_URL, payload)
+                self._send_json({
+                    "success": True,
+                    "device_code": res.get("device_code"),
+                    "user_code": res.get("user_code"),
+                    "verification_url": res.get("verification_url", "https://www.google.com/device"),
+                    "expires_in": res.get("expires_in", 1800),
+                    "interval": res.get("interval", 5)
+                })
+            except Exception as e:
+                self._send_json({"success": False, "message": f"Failed to initiate Google OAuth: {str(e)}"}, 500)
+
+        elif parsed.path == '/api/youtube/oauth-poll':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+            try: data = json.loads(body)
+            except Exception: data = {}
+            device_code = data.get('device_code', '').strip()
+            client_id = data.get('client_id', '').strip() or DEFAULT_CLIENT_ID
+            client_secret = data.get('client_secret', '').strip()
+
+            if not device_code:
+                self._send_json({"success": False, "message": "device_code is required"}, 400)
+                return
+
+            payload = {
+                "client_id": client_id,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": device_code
+            }
+            if client_secret:
+                payload["client_secret"] = client_secret
+
+            try:
+                res = http_post_form(GOOGLE_TOKEN_URL, payload)
+                if "access_token" in res:
+                    access_token = res["access_token"]
+                    refresh_token = res.get("refresh_token", "")
+
+                    channel_name = "YouTube Channel"
+                    try:
+                        ch_data = http_get_json(YOUTUBE_CHANNELS_URL, access_token)
+                        if "items" in ch_data and len(ch_data["items"]) > 0:
+                            channel_name = ch_data["items"][0]["snippet"]["title"]
+                    except Exception: pass
+
+                    stream_key = ""
+                    ingest_url = "rtmp://a.rtmp.youtube.com/live2"
+                    try:
+                        st_data = http_get_json(YOUTUBE_STREAMS_URL, access_token)
+                        if "items" in st_data and len(st_data["items"]) > 0:
+                            cdn = st_data["items"][0].get("cdn", {})
+                            ingest_info = cdn.get("ingestInfo", {})
+                            ingest_url = ingest_info.get("ingestAddress", ingest_url)
+                            stream_key = ingest_info.get("streamName", "")
+                    except Exception as e:
+                        self._send_json({"success": False, "message": f"Authorized Google, but error reading YouTube Live Stream: {str(e)}"}, 500)
+                        return
+
+                    if not stream_key:
+                        self._send_json({"success": False, "message": "Google Account linked, but no active YouTube Live Stream found. Create a stream in YouTube Studio once."}, 400)
+                        return
+
+                    session_data = {
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "access_token": access_token,
+                        "refresh_token": refresh_token,
+                        "channel_name": channel_name,
+                        "stream_key": stream_key,
+                        "ingest_url": ingest_url,
+                        "updated_at": time.time()
+                    }
+                    with open(OAUTH_FILE, 'w') as f:
+                        json.dump(session_data, f, indent=2)
+
+                    save_stream_config(ingest_url, stream_key)
+                    self._send_json({
+                        "success": True,
+                        "status": "authorized",
+                        "channel_name": channel_name,
+                        "ingest_url": ingest_url,
+                        "message": f"Successfully linked YouTube Account ({channel_name})! Stream key applied to OBS."
+                    })
+                else:
+                    self._send_json({"success": False, "status": "pending"})
+            except urllib.error.HTTPError as err:
+                err_body = err.read().decode('utf-8')
+                if "authorization_pending" in err_body:
+                    self._send_json({"success": False, "status": "pending"})
+                elif "slow_down" in err_body:
+                    self._send_json({"success": False, "status": "slow_down"})
+                elif "expired_token" in err_body:
+                    self._send_json({"success": False, "status": "expired", "message": "Google Authorization code expired. Please try again."})
+                else:
+                    self._send_json({"success": False, "status": "error", "message": f"OAuth Error: {err_body}"}, 400)
+            except Exception as e:
+                self._send_json({"success": False, "status": "error", "message": str(e)}, 500)
+
+        elif parsed.path == '/api/youtube/oauth-unlink':
+            if os.path.exists(OAUTH_FILE):
+                os.remove(OAUTH_FILE)
+            self._send_json({"success": True, "message": "YouTube account unlinked."})
+
+        elif parsed.path == '/api/stream-config':
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
             try: data = json.loads(body)
@@ -631,7 +784,7 @@ class DashboardAPIHandler(http.server.BaseHTTPRequestHandler):
                 msg = "Record start request sent." if ok else "Failed to send StartRecord request."
                 success = ok
             elif action == 'stop-record':
-                ok, _ = send_obs_query("StopRecord")
+                ok, _ = send_obs_ws_query("StopRecord")
                 msg = "Record stop request sent." if ok else "Failed to send StopRecord request."
                 success = ok
             elif action == 'restart-vnc':
@@ -666,7 +819,7 @@ if __name__ == '__main__':
 APIEEOF
 chmod +x /opt/obs-studio/scripts/obs-dashboard-api.py
 
-# Combined Dashboard HTML (Unified OBS Control Panel with Integrated OBS-Web & Stream Setup)
+# Combined Dashboard HTML (Unified OBS Control Panel with Integrated OBS-Web, Stream Setup & Google OAuth YouTube Linking)
 cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
 <!DOCTYPE html>
 <html lang="en">
@@ -830,7 +983,27 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
     .btn-purple { border-color: rgba(188, 140, 255, 0.5); }
     .btn-purple:hover { background: rgba(188, 140, 255, 0.2); border-color: var(--accent-purple); }
 
-    /* Form Inputs */
+    .oauth-box {
+      background: #090d13;
+      border: 1px solid var(--accent-blue);
+      border-radius: 8px;
+      padding: 16px;
+      margin-top: 16px;
+      text-align: center;
+    }
+    .user-code-display {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--accent-green);
+      background: var(--bg-card);
+      border: 1px dashed var(--accent-green);
+      padding: 10px 16px;
+      border-radius: 8px;
+      margin: 12px 0;
+      display: inline-block;
+    }
+
     .form-group { margin-bottom: 16px; }
     .form-label { display: block; font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
     .form-input, .form-select {
@@ -955,13 +1128,62 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
     </div>
   </div>
 
-  <!-- VIEW 3: STREAM SERVER SETUP -->
+  <!-- VIEW 3: STREAM SERVER SETUP & GOOGLE OAUTH -->
   <div id="view-stream" class="tab-view">
-    <div class="grid" style="max-width: 800px;">
+    <div class="grid" style="max-width: 900px;">
+      <!-- GOOGLE OAUTH YOUTUBE LINKING -->
       <div class="card card-full">
-        <div class="card-title"><span class="icon">⚙️</span> Streaming Server & Ingest Configuration</div>
-        <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">
-          Configure where OBS Studio sends the video stream (YouTube, Twitch, Restreamer, or Custom RTMP/SRT Server).
+        <div class="card-title"><span class="icon">🔑</span> Google OAuth YouTube Integration (No Stream Key Required)</div>
+        <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
+          Link your YouTube Account directly using Google OAuth Device Authorization Flow. OBS Studio will automatically fetch your live stream ingest URL and stream key without needing manual key entry!
+        </p>
+
+        <div class="status-row">
+          <span class="status-label">Google OAuth Status</span>
+          <span id="yt-oauth-badge" class="badge badge-red">Not Linked</span>
+        </div>
+        <div id="yt-channel-row" class="status-row" style="display: none;">
+          <span class="status-label">Linked Channel</span>
+          <span id="yt-channel-name" class="status-value" style="color: var(--accent-green);">—</span>
+        </div>
+
+        <div id="yt-oauth-actions" style="margin-top: 16px;">
+          <button id="btn-yt-connect" class="btn btn-danger" onclick="startGoogleOAuth()" style="width: 100%; padding: 12px;">
+            🔑 Link YouTube Account via Google OAuth Device Flow
+          </button>
+          <button id="btn-yt-unlink" class="btn btn-warning" onclick="unlinkGoogleOAuth()" style="width: 100%; padding: 12px; display: none; margin-top: 8px;">
+            ❌ Unlink YouTube Account
+          </button>
+        </div>
+
+        <!-- OAUTH DEVICE FLOW INSTRUCTIONS MODAL/BOX -->
+        <div id="oauth-box" class="oauth-box" style="display: none;">
+          <h3 style="font-size: 16px; margin-bottom: 8px; color: var(--accent-blue);">Google Authorization Required</h3>
+          <p style="font-size: 13px; color: var(--text-secondary);">
+            1. Open <a id="oauth-verify-link" href="#" target="_blank" style="color: var(--accent-blue); font-weight: 600;">google.com/device</a> in your browser.
+          </p>
+          <p style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;">
+            2. Enter the 8-character code below and click <strong>Allow</strong>:
+          </p>
+          
+          <div id="oauth-user-code" class="user-code-display">LOAD-ING...</div>
+
+          <div style="display: flex; gap: 8px; justify-content: center; margin-bottom: 8px;">
+            <button class="btn" onclick="copyOAuthCode()">📋 Copy Code</button>
+            <a id="oauth-direct-btn" href="#" target="_blank" class="btn btn-success">🔗 Open Google Device Link</a>
+          </div>
+
+          <p id="oauth-poll-status" class="loading" style="font-size: 12px; color: var(--accent-orange); margin-top: 8px;">
+            ⏳ Waiting for Google authorization...
+          </p>
+        </div>
+      </div>
+
+      <!-- MANUAL / CUSTOM STREAM CONFIG -->
+      <div class="card card-full">
+        <div class="card-title"><span class="icon">⚙️</span> Manual Stream Server & Ingest Configuration</div>
+        <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
+          Alternatively, configure custom RTMP/SRT stream destinations manually.
         </p>
 
         <div class="form-group">
@@ -1024,6 +1246,8 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
 
   <script>
     let activeLogType = 'obs';
+    let oauthPollInterval = null;
+    let currentDeviceCode = null;
 
     function showToast(msg, type = 'info') {
       const container = document.getElementById('toast-container');
@@ -1054,6 +1278,7 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
         }
       } else if (tab === 'stream') {
         loadStreamConfig();
+        checkGoogleOAuthStatus();
       } else if (tab === 'logs') {
         loadLog(activeLogType);
       }
@@ -1086,6 +1311,109 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
       }
     }
 
+    /* GOOGLE OAUTH YOUTUBE FLOW */
+    async function checkGoogleOAuthStatus() {
+      try {
+        const res = await fetch('/api/youtube/status?_=' + Date.now());
+        const data = await res.json();
+        const badge = document.getElementById('yt-oauth-badge');
+        const channelRow = document.getElementById('yt-channel-row');
+        const channelName = document.getElementById('yt-channel-name');
+        const btnConnect = document.getElementById('btn-yt-connect');
+        const btnUnlink = document.getElementById('btn-yt-unlink');
+
+        if (data.connected) {
+          badge.className = 'badge badge-green';
+          badge.textContent = 'Linked to Google YouTube';
+          channelRow.style.display = 'flex';
+          channelName.textContent = data.channel_name;
+          btnConnect.style.display = 'none';
+          btnUnlink.style.display = 'block';
+        } else {
+          badge.className = 'badge badge-red';
+          badge.textContent = 'Not Linked';
+          channelRow.style.display = 'none';
+          btnConnect.style.display = 'block';
+          btnUnlink.style.display = 'none';
+        }
+      } catch (e) {
+        console.error('Failed to check OAuth status:', e);
+      }
+    }
+
+    async function startGoogleOAuth() {
+      showToast('Initiating Google OAuth Device Flow...', 'info');
+      try {
+        const res = await fetch('/api/youtube/oauth-init', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        const data = await res.json();
+        if (data.success) {
+          currentDeviceCode = data.device_code;
+          document.getElementById('oauth-box').style.display = 'block';
+          document.getElementById('oauth-user-code').textContent = data.user_code;
+          document.getElementById('oauth-verify-link').href = data.verification_url;
+          document.getElementById('oauth-direct-btn').href = data.verification_url;
+          
+          if (oauthPollInterval) clearInterval(oauthPollInterval);
+          oauthPollInterval = setInterval(pollGoogleOAuthToken, (data.interval || 5) * 1000);
+          showToast('Enter code ' + data.user_code + ' at google.com/device', 'info');
+        } else {
+          showToast('OAuth init failed: ' + data.message, 'error');
+        }
+      } catch (err) {
+        showToast('Network error: ' + err.message, 'error');
+      }
+    }
+
+    async function pollGoogleOAuthToken() {
+      if (!currentDeviceCode) return;
+      try {
+        const res = await fetch('/api/youtube/oauth-poll', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_code: currentDeviceCode })
+        });
+        const data = await res.json();
+        if (data.success && data.status === 'authorized') {
+          clearInterval(oauthPollInterval);
+          oauthPollInterval = null;
+          document.getElementById('oauth-box').style.display = 'none';
+          showToast(data.message || 'YouTube account linked successfully!', 'success');
+          checkGoogleOAuthStatus();
+          loadStreamConfig();
+        } else if (data.status === 'expired') {
+          clearInterval(oauthPollInterval);
+          oauthPollInterval = null;
+          showToast('Authorization code expired. Please restart authorization.', 'error');
+          document.getElementById('oauth-box').style.display = 'none';
+        }
+      } catch (e) {
+        console.error('OAuth poll error:', e);
+      }
+    }
+
+    async function unlinkGoogleOAuth() {
+      if (!confirm('Are you sure you want to unlink your Google YouTube account?')) return;
+      try {
+        const res = await fetch('/api/youtube/oauth-unlink', { method: 'POST' });
+        const data = await res.json();
+        showToast(data.message || 'Unlinked.', 'info');
+        checkGoogleOAuthStatus();
+      } catch (e) {
+        showToast('Failed to unlink: ' + e.message, 'error');
+      }
+    }
+
+    function copyOAuthCode() {
+      const code = document.getElementById('oauth-user-code').textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        showToast('Code copied: ' + code, 'success');
+      });
+    }
+
     function applyPreset() {
       const preset = document.getElementById('stream-preset').value;
       const serverInput = document.getElementById('stream-server');
@@ -1107,7 +1435,6 @@ cat <<'HTMLEOF' >/opt/obs-studio/dashboard/index.html
         if (data.success && data.config) {
           document.getElementById('stream-server').value = data.config.server || '';
           document.getElementById('stream-key').value = data.config.key || '';
-          showToast('Stream settings loaded.', 'info');
         }
       } catch (err) {
         showToast('Failed to load stream settings: ' + err.message, 'error');
@@ -1245,6 +1572,12 @@ server {
 
     location /manifest.json {
         alias /opt/obs-studio/dashboard/obs-web/manifest.json;
+    }
+
+    location /api/youtube/ {
+        proxy_pass http://127.0.0.1:8889/api/youtube/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
     }
 
     location /api/stream-config {
