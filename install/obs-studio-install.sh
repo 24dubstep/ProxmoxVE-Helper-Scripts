@@ -1616,64 +1616,89 @@ EOF
 ln -sf /etc/nginx/sites-available/obs-dashboard /etc/nginx/sites-enabled/obs-dashboard
 rm -f /etc/nginx/sites-enabled/default
 
-# Create Status Update Script /usr/local/bin/obs-status-update.sh
+# Create Status Update Script /usr/local/bin/obs-status-update.sh (Python 3)
 cat <<'STATUSEOF' >/usr/local/bin/obs-status-update.sh
-#!/usr/bin/env bash
-mkdir -p /opt/obs-studio/dashboard/api
+#!/usr/bin/env python3
+import json, os, subprocess, time
 
-OBS_STATUS="stopped"
-OBS_PID=""
-OBS_UPTIME=""
+os.makedirs('/opt/obs-studio/dashboard/api', exist_ok=True)
 
-if pgrep -f "bin/obs" >/dev/null 2>&1 || pgrep -x obs >/dev/null 2>&1; then
-  OBS_STATUS="running"
-  OBS_PID=$(pgrep -f "bin/obs" 2>/dev/null | head -n1 || pgrep -x obs 2>/dev/null | head -n1 || echo "")
-  if [ -n "$OBS_PID" ]; then
-    OBS_UPTIME=$(ps -p "$OBS_PID" -o etime= 2>/dev/null | xargs 2>/dev/null || echo "active")
-  fi
-fi
+obs_status = "stopped"
+obs_pid = ""
+obs_uptime = ""
 
-GPU_NAME="Software / CPU"
-GPU_ENC="x264 (CPU)"
-if command -v nvidia-smi >/dev/null 2>&1; then
-  NVIDIA_INFO=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null | head -n1 || echo "")
-  if [ -n "$NVIDIA_INFO" ]; then
-    GPU_NAME="$NVIDIA_INFO"
-    GPU_ENC="nvenc (NVIDIA GPU)"
-  fi
-fi
+try:
+    res = subprocess.run(["pgrep", "-f", "bin/obs"], capture_output=True, text=True)
+    pids = res.stdout.strip().split()
+    if not pids:
+        res = subprocess.run(["pgrep", "-x", "obs"], capture_output=True, text=True)
+        pids = res.stdout.strip().split()
+    if pids:
+        obs_status = "running"
+        obs_pid = pids[0]
+        up_res = subprocess.run(["ps", "-p", obs_pid, "-o", "etime="], capture_output=True, text=True)
+        obs_uptime = up_res.stdout.strip() or "active"
+except Exception: pass
 
-CPU_USAGE=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2 + $4}' 2>/dev/null || echo "0")
-MEM_TOTAL=$(free -m 2>/dev/null | awk '/Mem:/ {print $2}' 2>/dev/null || echo "0")
-MEM_USED=$(free -m 2>/dev/null | awk '/Mem:/ {print $3}' 2>/dev/null || echo "0")
-REC_DISK=$(df -h /opt/obs-studio/recordings 2>/dev/null | tail -n1 | awk '{print $3 "/" $2 " (" $5 ")"}' 2>/dev/null || echo "N/A")
+gpu_name = "Software / CPU"
+gpu_enc = "x264 (CPU)"
+try:
+    smi = subprocess.run(["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"], capture_output=True, text=True)
+    if smi.returncode == 0 and smi.stdout.strip():
+        gpu_name = smi.stdout.strip().split('\n')[0]
+        gpu_enc = "nvenc (NVIDIA GPU)"
+except Exception: pass
 
-cat <<EOF >/opt/obs-studio/dashboard/api/status.json
-{
-  "timestamp": "$(date -Iseconds 2>/dev/null || date)",
-  "obs": {
-    "status": "${OBS_STATUS}",
-    "pid": "${OBS_PID}",
-    "uptime": "${OBS_UPTIME}",
-    "websocket_port": 4455
-  },
-  "gpu": {
-    "info": "${GPU_NAME}",
-    "encoder": "${GPU_ENC}"
-  },
-  "system": {
-    "cpu_usage": "${CPU_USAGE:-0}",
-    "memory_total_mb": ${MEM_TOTAL:-0},
-    "memory_used_mb": ${MEM_USED:-0},
-    "disk_recordings": "${REC_DISK}"
-  }
+cpu_usage = "0"
+try:
+    top_res = subprocess.run("top -bn1 2>/dev/null | grep 'Cpu(s)' | awk '{print $2 + $4}'", shell=True, capture_output=True, text=True)
+    cpu_usage = top_res.stdout.strip() or "0"
+except Exception: pass
+
+mem_total, mem_used = 0, 0
+try:
+    free_res = subprocess.run("free -m 2>/dev/null | awk '/Mem:/ {print $2 \" \" $3}'", shell=True, capture_output=True, text=True)
+    parts = free_res.stdout.strip().split()
+    if len(parts) >= 2:
+        mem_total = int(parts[0])
+        mem_used = int(parts[1])
+except Exception: pass
+
+rec_disk = "N/A"
+try:
+    df_res = subprocess.run("df -h /opt/obs-studio/recordings 2>/dev/null | tail -n1 | awk '{print $3 \"/\" $2 \" (\" $5 \")\"}'", shell=True, capture_output=True, text=True)
+    rec_disk = df_res.stdout.strip() or "N/A"
+except Exception: pass
+
+data = {
+    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    "obs": {
+        "status": obs_status,
+        "pid": obs_pid,
+        "uptime": obs_uptime,
+        "websocket_port": 4455
+    },
+    "gpu": {
+        "info": gpu_name,
+        "encoder": gpu_enc
+    },
+    "system": {
+        "cpu_usage": cpu_usage,
+        "memory_total_mb": mem_total,
+        "memory_used_mb": mem_used,
+        "disk_recordings": rec_disk
+    }
 }
-EOF
+
+try:
+    with open('/opt/obs-studio/dashboard/api/status.json', 'w') as f:
+        json.dump(data, f, indent=2)
+except Exception: pass
 STATUSEOF
 chmod +x /usr/local/bin/obs-status-update.sh
 
 # Generate initial status
-/usr/local/bin/obs-status-update.sh
+/usr/local/bin/obs-status-update.sh 2>/dev/null || true
 
 # Cron job for status updates (every 30 seconds)
 cat <<'EOF' >/etc/cron.d/obs-status
