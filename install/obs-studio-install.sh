@@ -1556,7 +1556,8 @@ server {
     }
 
     location /obs-web/ {
-        alias /opt/obs-studio/dashboard/obs-web/;
+        root /opt/obs-studio/dashboard;
+        index index.html;
         try_files \$uri \$uri/ /obs-web/index.html;
     }
 
@@ -1567,11 +1568,11 @@ server {
     }
 
     location /favicon.png {
-        alias /opt/obs-studio/dashboard/obs-web/favicon.png;
+        root /opt/obs-studio/dashboard/obs-web;
     }
 
     location /manifest.json {
-        alias /opt/obs-studio/dashboard/obs-web/manifest.json;
+        root /opt/obs-studio/dashboard/obs-web;
     }
 
     location /api/youtube/ {
