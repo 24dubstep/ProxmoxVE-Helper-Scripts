@@ -40,10 +40,14 @@ OBS_HEIGHT="${OBS_RESOLUTION#*x}"
 # ==============================================================================
 msg_info "Installing Dependencies (LightDM, OBS Studio, X11, VNC, Nginx)"
 $STD apt-get update
-$STD apt-get install -y software-properties-common
-$STD add-apt-repository -y universe
-$STD add-apt-repository -y ppa:obsproject/obs-studio
-$STD apt-get update
+$STD apt-get install -y software-properties-common curl wget git
+
+# PPAs are Ubuntu-only; Debian 12 includes obs-studio in standard repos
+if grep -qEi 'ubuntu' /etc/os-release 2>/dev/null; then
+  $STD add-apt-repository -y universe 2>/dev/null || true
+  $STD add-apt-repository -y ppa:obsproject/obs-studio 2>/dev/null || true
+  $STD apt-get update
+fi
 
 DEBIAN_FRONTEND=noninteractive $STD apt-get install -y \
   lightdm \
@@ -67,11 +71,30 @@ DEBIAN_FRONTEND=noninteractive $STD apt-get install -y \
   curl \
   git \
   wget
-msg_ok "Installed Dependencies"
+
+# Install Google Chrome for standalone browser capture
+CHROME_DEB="$(mktemp).deb"
+curl -fsSL -o "${CHROME_DEB}" "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" 2>/dev/null || true
+if [ -f "${CHROME_DEB}" ]; then
+  $STD apt-get install -y "${CHROME_DEB}" 2>/dev/null || true
+  rm -f "${CHROME_DEB}"
+fi
+
+# Download nvidia-patch for unlocking NVENC session limits
+if [ ! -d "/opt/nvidia-patch" ]; then
+  git clone https://github.com/keylase/nvidia-patch.git /opt/nvidia-patch 2>/dev/null || true
+fi
+
+msg_ok "Installed Dependencies & Browser"
 
 msg_info "Installing NVIDIA CUDA 12 Toolkit & Repository"
 KEYRING_TMP="$(mktemp)"
-if curl -fsSL -o "${KEYRING_TMP}" "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb" 2>/dev/null; then
+if grep -qEi 'debian' /etc/os-release 2>/dev/null; then
+  CUDA_URL="https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb"
+else
+  CUDA_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb"
+fi
+if curl -fsSL -o "${KEYRING_TMP}" "${CUDA_URL}" 2>/dev/null; then
   $STD dpkg -i "${KEYRING_TMP}" 2>/dev/null || true
 fi
 rm -f "${KEYRING_TMP}"
@@ -130,7 +153,7 @@ autologin-user=root
 autologin-user-timeout=0
 user-session=openbox
 type=local
-xserver-command=Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac +render -noreset
+xserver-command=Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac -extension GLX +render -noreset
 EOF
 
 msg_ok "Configured LightDM & X11 Framebuffer"
@@ -146,6 +169,12 @@ OBS_SCENES="${OBS_CONFIG}/basic/scenes"
 OBS_PLUGIN_WS="${OBS_CONFIG}/plugin_config/obs-websocket"
 
 mkdir -p "${OBS_PROFILE}" "${OBS_SCENES}" "${OBS_PLUGIN_WS}" /root/recordings
+
+# global.ini - OBS global configuration
+cat <<EOF >"${OBS_CONFIG}/global.ini"
+[General]
+BrowserHWAccel=false
+EOF
 
 # Determine encoder settings for profile
 case "${GPU_ENCODER}" in
@@ -362,7 +391,7 @@ fi
 
 # Start virtual framebuffer if LightDM/Xorg/Xvfb isn't active on display
 if ! pgrep -f "Xvfb ${OBS_DISPLAY}" >/dev/null && ! pgrep -f "Xorg ${OBS_DISPLAY}" >/dev/null; then
-  Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac +render -noreset &
+  Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac -extension GLX +render -noreset &
   sleep 2
 fi
 
@@ -394,14 +423,14 @@ fi
 while true; do
   if ! pgrep -f "Xvfb ${OBS_DISPLAY}" >/dev/null && ! pgrep -f "Xorg ${OBS_DISPLAY}" >/dev/null; then
     rm -f "/tmp/.X\${DISP_NUM}-lock" "/tmp/.X11-unix/X\${DISP_NUM}"
-    Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac +render -noreset &
+    Xvfb ${OBS_DISPLAY} -screen 0 ${OBS_RESOLUTION}x24 -ac -extension GLX +render -noreset &
     sleep 2
   fi
 
   if ! pgrep -f "bin/obs" >/dev/null && ! pgrep -x obs >/dev/null; then
-    obs --profile "Headless" --collection "Headless" --startstreaming >>/var/log/obs-studio.log 2>&1 || \
-    obs --profile "Headless" --collection "Headless" >>/var/log/obs-studio.log 2>&1 || \
-    obs >>/var/log/obs-studio.log 2>&1
+    rm -rf /root/.config/obs-studio/.sentinel /root/.config/obs-studio/safe_mode
+    obs --disable-shutdown-check --disable-updater --profile "Headless" --collection "Headless" >>/var/log/obs-studio.log 2>&1 || \
+    obs --disable-shutdown-check --disable-updater >>/var/log/obs-studio.log 2>&1
   fi
   sleep 3
 done
