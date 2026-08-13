@@ -42,10 +42,15 @@ msg_info "Installing Dependencies (LightDM, OBS Studio, X11, VNC, Nginx)"
 $STD apt-get update
 $STD apt-get install -y software-properties-common curl wget git
 
-# PPAs are Ubuntu-only; Debian 12 includes obs-studio in standard repos
 if grep -qEi 'ubuntu' /etc/os-release 2>/dev/null; then
   $STD add-apt-repository -y universe 2>/dev/null || true
   $STD add-apt-repository -y ppa:obsproject/obs-studio 2>/dev/null || true
+  $STD apt-get update
+elif grep -qEi 'debian' /etc/os-release 2>/dev/null; then
+  msg_info "Adding official OBS Studio PPA to Debian for Full NVENC & Browser Source support"
+  gpg --keyserver keyserver.ubuntu.com --recv-keys BC434183E5807C364572A5D7A94411130F073E1B 2>/dev/null || true
+  gpg --export BC434183E5807C364572A5D7A94411130F073E1B > /etc/apt/trusted.gpg.d/obs-studio.gpg 2>/dev/null || true
+  echo "deb [signed-by=/etc/apt/trusted.gpg.d/obs-studio.gpg] http://ppa.launchpad.net/obsproject/obs-studio/ubuntu jammy main" > /etc/apt/sources.list.d/obs-studio.list
   $STD apt-get update
 fi
 
